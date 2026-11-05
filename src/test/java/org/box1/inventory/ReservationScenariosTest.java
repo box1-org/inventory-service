@@ -263,7 +263,7 @@ class ReservationScenariosTest {
         String orderId = newOrderId();
         direct(Harness.placed(id(), orderId, SITE, sku, 1));
         assertThrows(IllegalStateException.class, () -> Harness.exec("DELETE FROM reservation_history WHERE reservation_id = '" + Harness.reservationId(orderId) + "'"));
-        assertThrows(IllegalStateException.class, () -> Harness.exec("UPDATE stock_movement SET delta = 0 WHERE sku = '" + sku + "'"));
+        assertThrows(IllegalStateException.class, () -> Harness.exec("UPDATE stock_movement SET delta = 0 WHERE kind = 'SEED'"));
     }
 
     @Test

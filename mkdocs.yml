@@ -2,5 +2,7 @@ site_name: inventory-service
 site_description: "The backend inventory service for box1 operations"
 nav:
   - Home: index.md
+  - Architecture: architecture.md
+  - Runbook: runbook.md
 plugins:
   - techdocs-core

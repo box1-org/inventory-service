@@ -38,11 +38,11 @@ public class ReservationService {
     private final Duration ttl;
 
     public ReservationService(InventoryStore store, EventFactory events, Clock clock,
-            @ConfigProperty(name = "inventory.reservation.ttl") String ttl) {
+            @ConfigProperty(name = "inventory.reservation.ttl") Duration ttl) {
         this.store = store;
         this.events = events;
         this.clock = clock;
-        this.ttl = Duration.parse(ttl);
+        this.ttl = ttl;
     }
 
     /** Apply one inbound event once. A redelivered eventId has no effect. */

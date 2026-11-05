@@ -135,6 +135,43 @@ spec:
         value: "inventory-service"
       - name: application-namespace
         value: "inventory-service-dev"
+    # The shared smoke task knows nothing about inventory. These checks write nothing, and accept either read policy.
+    - name: inventory-api-smoke
+      runAfter:
+      - smoke
+      taskSpec:
+        steps:
+        - name: inventory-api
+          image: registry.access.redhat.com/ubi9/python-311@sha256:d0b35f779ca0ae87deaf17cd1923461904f52d3ef249a53dbd487e02bdabdde6
+          script: |
+            #!/usr/bin/env python3
+            import json, urllib.error, urllib.request
+            base = 'https://inventory-service-dev.apps.ocp.box1.org'
+            def call(path, method='GET', data=None, headers=None):
+                request = urllib.request.Request(base + path, data=data, headers=headers or {}, method=method)
+                try:
+                    with urllib.request.urlopen(request, timeout=20) as response:
+                        return response.status, response.headers.get('Content-Type', ''), response.read().decode()
+                except urllib.error.HTTPError as error:
+                    return error.code, error.headers.get('Content-Type', ''), error.read().decode()
+            def problem(result, status):
+                assert result[0] == status and 'application/problem+json' in result[1], result
+            body = json.dumps({'quantity': 1, 'reason': 'smoke'}).encode()
+            json_body = {'Content-Type': 'application/json', 'Idempotency-Key': 'smoke'}
+            problem(call('/internal/v1/stock/site_nyc/SKU-42/restock', 'POST', body, json_body), 401)
+            problem(call('/internal/v1/reservations/res_smoke/release', 'POST', body, json_body), 401)
+            for path in ['/api/v1/inventory', '/api/v1/reservations/res_smoke']:
+                assert call(path, 'POST', body, json_body)[0] == 405, path
+            status, content, listing = call('/api/v1/inventory?limit=1')
+            if status == 200:
+                assert isinstance(json.loads(listing), list), listing
+                problem(call('/api/v1/reservations/res_smoke_missing'), 404)
+                problem(call('/api/v1/inventory?limit=0'), 400)
+            else:
+                problem((status, content, listing), 401)
+            api = json.loads(call('/q/openapi?format=json')[2])
+            assert '/api/v1/inventory' in api['paths'] and '/internal/v1/stock/{siteId}/{sku}/restock' in api['paths']
+            print('PASS: mutations need a token, read routes have no mutation, read policy status ' + str(status) + ', OpenAPI served. Nothing was written.')
     results:
     - name: image-digest
       value: "$(tasks.build.results.image-digest)"
@@ -147,3 +184,5 @@ spec:
     serviceAccountName: ci-gitops
   - pipelineTaskName: smoke
     serviceAccountName: ci-observe
+  - pipelineTaskName: inventory-api-smoke
+    serviceAccountName: ci-test

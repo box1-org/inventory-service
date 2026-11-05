@@ -4,7 +4,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.format.DateTimeParseException;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
@@ -58,7 +57,7 @@ public class OrderEventsConsumer {
     private final long maxBackoffMillis;
 
     public OrderEventsConsumer(EventParser parser, ReservationService reservations, InventoryMetrics metrics, Tracer tracer,
-            Clock clock, @ConfigProperty(name = "inventory.consumer.order-events-floor") String floor,
+            Clock clock, @ConfigProperty(name = "inventory.consumer.order-events-floor") Instant floor,
             @ConfigProperty(name = "inventory.consumer.max-attempts") int maxAttempts,
             @ConfigProperty(name = "inventory.consumer.initial-backoff-millis") long initialBackoffMillis,
             @ConfigProperty(name = "inventory.consumer.max-backoff-millis") long maxBackoffMillis) {
@@ -67,18 +66,10 @@ public class OrderEventsConsumer {
         this.metrics = metrics;
         this.tracer = tracer;
         this.clock = clock;
-        this.floor = parseFloor(floor);
+        this.floor = floor;
         this.maxAttempts = maxAttempts;
         this.initialBackoffMillis = initialBackoffMillis;
         this.maxBackoffMillis = maxBackoffMillis;
-    }
-
-    private static Instant parseFloor(String value) {
-        try {
-            return Instant.parse(value);
-        } catch (DateTimeParseException error) {
-            throw new IllegalStateException("INVENTORY_ORDER_EVENTS_FLOOR must be an ISO-8601 instant", error);
-        }
     }
 
     @Incoming("order-events")

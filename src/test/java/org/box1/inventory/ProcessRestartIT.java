@@ -19,6 +19,7 @@ import java.util.concurrent.TimeUnit;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -33,6 +34,17 @@ class ProcessRestartIT {
     private static final HttpClient HTTP = HttpClient.newHttpClient();
     private static PostgreSQLContainer<?> postgres;
     private static KafkaContainer kafka;
+    private final List<Process> started = new java.util.ArrayList<>();
+
+    /** A failed assertion must not leave a process holding Kafka partitions for the next test. */
+    @AfterEach
+    void stopEverything() throws InterruptedException {
+        for (Process process : started) {
+            process.destroyForcibly();
+            process.waitFor();
+        }
+        started.clear();
+    }
 
     @BeforeAll
     static void containers() {
@@ -71,7 +83,7 @@ class ProcessRestartIT {
         return builder;
     }
 
-    private static App start(Map<String, String> extra) throws Exception {
+    private App start(Map<String, String> extra) throws Exception {
         int port;
         try (ServerSocket socket = new ServerSocket(0)) {
             port = socket.getLocalPort();
@@ -81,6 +93,7 @@ class ProcessRestartIT {
         builder.environment().put("INVENTORY_ORDER_EVENTS_FLOOR", Harness.FLOOR);
         builder.environment().putAll(extra);
         App app = new App(builder.start(), port, log);
+        started.add(app.process());
         Harness.await("application ready", () -> {
             try {
                 return get(app, "/q/health/ready").statusCode() == 200;
@@ -95,26 +108,27 @@ class ProcessRestartIT {
         return HTTP.send(HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + path)).build(), HttpResponse.BodyHandlers.ofString());
     }
 
-    @Test
-    void withoutAFloorTheApplicationRefusesToStart() throws Exception {
+    private void refusesToStart(Map<String, String> env, String expectedInLog) throws Exception {
         int port;
         try (ServerSocket socket = new ServerSocket(0)) {
             port = socket.getLocalPort();
         }
-        Path log = Files.createTempFile("inventory-service-nofloor", ".log");
+        Path log = Files.createTempFile("inventory-service-refused", ".log");
         ProcessBuilder builder = builder(port, log);
         builder.environment().remove("INVENTORY_ORDER_EVENTS_FLOOR");
+        builder.environment().putAll(env);
         Process process = builder.start();
+        started.add(process);
         assertTrue(process.waitFor(90, TimeUnit.SECONDS), "exits by itself");
         assertNotEquals(0, process.exitValue());
-        assertTrue(Files.readString(log).contains("INVENTORY_ORDER_EVENTS_FLOOR"), "says what is missing");
+        assertTrue(Files.readString(log).contains(expectedInLog), "says what is wrong");
+    }
 
-        Path bad = Files.createTempFile("inventory-service-badfloor", ".log");
-        ProcessBuilder badBuilder = builder(port, bad);
-        badBuilder.environment().put("INVENTORY_ORDER_EVENTS_FLOOR", "yesterday");
-        Process badProcess = badBuilder.start();
-        assertTrue(badProcess.waitFor(90, TimeUnit.SECONDS), "exits by itself");
-        assertNotEquals(0, badProcess.exitValue());
+    @Test
+    void withoutAValidFloorTheApplicationRefusesToStart() throws Exception {
+        refusesToStart(Map.of(), "inventory.consumer.order-events-floor");
+        refusesToStart(Map.of("INVENTORY_ORDER_EVENTS_FLOOR", "yesterday"), "inventory.consumer.order-events-floor");
+        refusesToStart(Map.of("INVENTORY_ORDER_EVENTS_FLOOR", Harness.FLOOR, "INVENTORY_RESERVATION_TTL", "soon"), "inventory.reservation.ttl");
     }
 
     @Test
