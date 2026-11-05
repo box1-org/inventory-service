@@ -35,20 +35,22 @@ public class InventoryMetrics {
     private final InventoryStore store;
     private final String bootstrapServers;
     private final String dlqTopic;
+    private final ExpiryGate gate;
     private final AtomicReference<InventoryStore.Stats> stats =
             new AtomicReference<>(new InventoryStore.Stats(0, 0, 0, 0, 0, 0, 0));
-    private final AtomicLong dlqDepth = new AtomicLong();
+    private final AtomicLong dlqDepth = new AtomicLong(-1);
     private final AtomicLong refreshFailures = new AtomicLong();
     private final AtomicLong dlqFailures = new AtomicLong();
     private Admin admin;
 
     public InventoryMetrics(MeterRegistry registry, InventoryStore store,
             @ConfigProperty(name = "kafka.bootstrap.servers") String bootstrapServers,
-            @ConfigProperty(name = "inventory.dlq.topic") String dlqTopic) {
+            @ConfigProperty(name = "inventory.dlq.topic") String dlqTopic, ExpiryGate gate) {
         this.registry = registry;
         this.store = store;
         this.bootstrapServers = bootstrapServers;
         this.dlqTopic = dlqTopic;
+        this.gate = gate;
         Gauge.builder("box1_outbox_pending", stats, s -> s.get().outboxPending()).register(registry);
         Gauge.builder("box1_outbox_oldest_pending_age_seconds", stats, s -> s.get().oldestPendingSeconds()).register(registry);
         Gauge.builder("box1_inventory_reservations_active", stats, s -> s.get().active()).register(registry);
@@ -68,7 +70,7 @@ public class InventoryMetrics {
             if (refreshFailures.getAndIncrement() == 0) {
                 LOG.warn("Unable to refresh inventory gauges");
             }
-            registry.counter("box1_inventory_metrics_refresh_failures").increment();
+            registry.counter("box1_inventory_metrics_refresh_failures", "source", "database").increment();
             return;
         }
         refreshFailures.set(0);
@@ -80,11 +82,13 @@ public class InventoryMetrics {
         try {
             dlqDepth.set(readDlqDepth());
             dlqFailures.set(0);
+            gate.brokerReached();
         } catch (ExecutionException | TimeoutException | RuntimeException error) {
             if (dlqFailures.getAndIncrement() == 0) {
                 LOG.warnv("Unable to read dead-letter depth: {0}", error.getClass().getSimpleName());
             }
-            registry.counter("box1_inventory_metrics_refresh_failures").increment();
+            dlqDepth.set(-1);
+            registry.counter("box1_inventory_metrics_refresh_failures", "source", "kafka").increment();
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
         }
@@ -147,6 +151,16 @@ public class InventoryMetrics {
     /** Count a consumed event by type and outcome. Types are checked against a closed set before this runs. */
     public void consumed(String eventType, String outcome) {
         registry.counter("box1_events_consumed", "type", eventType, "outcome", outcome).increment();
+    }
+
+    /** Count a poll that left due holds alone, because events may be behind. */
+    public void expiryHeld() {
+        registry.counter("box1_inventory_expiry_held").increment();
+    }
+
+    /** Count a retry that used no attempt, because the database cannot serve. */
+    public void heldForDatabase() {
+        registry.counter("box1_inventory_consumer_held_for_database").increment();
     }
 
     /** Record how old an event was on arrival. */

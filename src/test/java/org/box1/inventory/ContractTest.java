@@ -152,6 +152,11 @@ class ContractTest {
             ok.replace("order.placed.v1", "unknown.event.v1"),
             ok.replace("order.placed.v1", "shipment.confirmed.v1"),
             ok.replaceFirst("\"occurredAt\":\"[^\"]+\"", "\"occurredAt\":\"yesterday\""),
+            ok.replace("\"schemaVersion\":1", "\"schemaVersion\":\"1\""),
+            ok.replace("\"schemaVersion\":1", "\"schemaVersion\":1.9"),
+            ok.replaceFirst("\"eventId\":\"[^\"]+\"", "\"eventId\":\"1-1-1-1-1\""),
+            ok.replace("corr-test", "corr\\u0000test"),
+            ok.replace("cause-test", "c".repeat(129)),
         };
         for (String value : bad) {
             Assertions.assertThrows(PoisonEventException.class, () -> parser.parse(value, types), value);

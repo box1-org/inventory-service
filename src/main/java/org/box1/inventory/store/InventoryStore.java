@@ -383,20 +383,51 @@ public class InventoryStore {
 
     /** Open a reconciliation item. A redelivered event opens nothing further. */
     @Transactional(Transactional.TxType.MANDATORY)
-    public void reconciliation(String orderId, String reservationId, String kind, boolean stockAdjusted, UUID eventId, Instant now) {
-        String sql = "INSERT INTO reconciliation_item (order_id, reservation_id, kind, stock_adjusted, event_id, created_at)"
-                + " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (event_id, kind) DO NOTHING";
+    public void reconciliation(String orderId, String reservationId, String kind, boolean stockAdjusted, String shipmentId,
+            UUID eventId, Instant now) {
+        String sql = "INSERT INTO reconciliation_item (order_id, reservation_id, kind, stock_adjusted, shipment_id, event_id, created_at)"
+                + " VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id, kind) DO NOTHING";
         try (Connection c = dataSource.getConnection(); PreparedStatement s = c.prepareStatement(sql)) {
             s.setString(1, orderId);
             s.setString(2, reservationId);
             s.setString(3, kind);
             s.setBoolean(4, stockAdjusted);
-            s.setObject(5, eventId);
-            s.setTimestamp(6, Timestamp.from(now));
+            s.setString(5, shipmentId);
+            s.setObject(6, eventId);
+            s.setTimestamp(7, Timestamp.from(now));
             s.executeUpdate();
         } catch (SQLException error) {
             throw new StoreException(error);
         }
+    }
+
+    /** Whether a late shipment was already recorded for this hold: this one, or any that adjusted stock. */
+    @Transactional(Transactional.TxType.MANDATORY)
+    public LateShipment lateShipment(String reservationId, String shipmentId) {
+        String sql = "SELECT COALESCE(bool_or(shipment_id = ?), false), COALESCE(bool_or(stock_adjusted), false)"
+                + " FROM reconciliation_item WHERE reservation_id = ? AND kind = 'SHIPMENT_AFTER_RELEASE'";
+        try (Connection c = dataSource.getConnection(); PreparedStatement s = c.prepareStatement(sql)) {
+            s.setString(1, shipmentId);
+            s.setString(2, reservationId);
+            try (ResultSet r = s.executeQuery()) {
+                r.next();
+                return new LateShipment(r.getBoolean(1), r.getBoolean(2));
+            }
+        } catch (SQLException error) {
+            throw new StoreException(error);
+        }
+    }
+
+    /** Read a hold and lock it, so what the caller then records as its previous status is true. */
+    @Transactional(Transactional.TxType.MANDATORY)
+    public Optional<Reservation> lockForOrder(String orderId) {
+        return readOne("SELECT " + RESERVATION_COLUMNS + " FROM reservations WHERE order_id = ? FOR UPDATE", orderId);
+    }
+
+    /** Read a hold by ID and lock it. */
+    @Transactional(Transactional.TxType.MANDATORY)
+    public Optional<Reservation> lock(String reservationId) {
+        return readOne("SELECT " + RESERVATION_COLUMNS + " FROM reservations WHERE reservation_id = ? FOR UPDATE", reservationId);
     }
 
     /** IDs of holds past their deadline, oldest first. */
@@ -462,6 +493,9 @@ public class InventoryStore {
             throw new StoreException(error);
         }
     }
+
+    /** What is already recorded about late shipments for a hold. */
+    public record LateShipment(boolean sameShipment, boolean adjusted) {}
 
     /** A stored order decision. */
     public record Outcome(String outcome, String reservationId, String reasonCode, String siteId, String sku, int quantity) {}

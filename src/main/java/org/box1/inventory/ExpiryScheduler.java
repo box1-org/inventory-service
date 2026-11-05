@@ -14,7 +14,8 @@ import org.jboss.logging.MDC;
 
 /**
  * Finds due holds and expires each in its own transaction. Re-running, crashing or a second pod during a rollout is safe,
- * because expiry is one conditional update and only one caller can win it.
+ * because expiry is one conditional update and only one caller can win it. Polling waits for {@link ExpiryGate}, so that
+ * recovery from an outage cannot expire a hold whose fulfillment signal is still on the topic.
  */
 @ApplicationScoped
 public class ExpiryScheduler {
@@ -24,20 +25,26 @@ public class ExpiryScheduler {
     private final ReservationService reservations;
     private final InventoryMetrics metrics;
     private final Clock clock;
+    private final ExpiryGate gate;
     private final int batchSize;
 
     public ExpiryScheduler(InventoryStore store, ReservationService reservations, InventoryMetrics metrics, Clock clock,
-            @ConfigProperty(name = "inventory.expiry.batch-size") int batchSize) {
+            ExpiryGate gate, @ConfigProperty(name = "inventory.expiry.batch-size") int batchSize) {
         this.store = store;
         this.reservations = reservations;
         this.metrics = metrics;
         this.clock = clock;
+        this.gate = gate;
         this.batchSize = batchSize;
     }
 
     @Scheduled(every = "${inventory.expiry.interval}", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     void poll() {
         try {
+            if (!gate.open()) {
+                metrics.expiryHeld();
+                return;
+            }
             expireDue();
         } catch (RuntimeException error) {
             LOG.warnv("Expiry poll failed: {0}", error.getClass().getSimpleName());

@@ -1,5 +1,8 @@
 package org.box1.inventory.messaging;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
@@ -17,6 +20,7 @@ import io.opentelemetry.context.propagation.TextMapGetter;
 import io.smallrye.common.annotation.Blocking;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.box1.inventory.ExpiryGate;
 import org.box1.inventory.InventoryMetrics;
 import org.box1.inventory.ReservationService;
 import org.box1.inventory.domain.InboundEvent;
@@ -52,12 +56,13 @@ public class OrderEventsConsumer {
     private final Tracer tracer;
     private final Clock clock;
     private final Instant floor;
+    private final ExpiryGate gate;
     private final int maxAttempts;
     private final long initialBackoffMillis;
     private final long maxBackoffMillis;
 
     public OrderEventsConsumer(EventParser parser, ReservationService reservations, InventoryMetrics metrics, Tracer tracer,
-            Clock clock, @ConfigProperty(name = "inventory.consumer.order-events-floor") Instant floor,
+            Clock clock, ExpiryGate gate, @ConfigProperty(name = "inventory.consumer.order-events-floor") Instant floor,
             @ConfigProperty(name = "inventory.consumer.max-attempts") int maxAttempts,
             @ConfigProperty(name = "inventory.consumer.initial-backoff-millis") long initialBackoffMillis,
             @ConfigProperty(name = "inventory.consumer.max-backoff-millis") long maxBackoffMillis) {
@@ -67,6 +72,7 @@ public class OrderEventsConsumer {
         this.tracer = tracer;
         this.clock = clock;
         this.floor = floor;
+        this.gate = gate;
         this.maxAttempts = maxAttempts;
         this.initialBackoffMillis = initialBackoffMillis;
         this.maxBackoffMillis = maxBackoffMillis;
@@ -75,60 +81,75 @@ public class OrderEventsConsumer {
     @Incoming("order-events")
     @Blocking
     void onOrderEvent(ConsumerRecord<String, byte[]> record) {
-        process(text(record), EventParser.ORDER_TOPIC_TYPES);
+        process(record, EventParser.ORDER_TOPIC_TYPES);
     }
 
     @Incoming("fulfillment-events")
     @Blocking
     void onFulfillmentEvent(ConsumerRecord<String, byte[]> record) {
-        process(text(record), EventParser.FULFILLMENT_TOPIC_TYPES);
+        process(record, EventParser.FULFILLMENT_TOPIC_TYPES);
     }
 
-    /** Bytes stay raw on the channel, so a dead-lettered record is exactly what arrived. */
+    /** Bytes stay raw on the channel, so a dead-lettered record is exactly what arrived. Invalid UTF-8 is poison. */
     private static String text(ConsumerRecord<String, byte[]> record) {
-        return record.value() == null ? null : new String(record.value(), StandardCharsets.UTF_8);
+        if (record.value() == null) {
+            return null;
+        }
+        try {
+            return StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(record.value())).toString();
+        } catch (CharacterCodingException error) {
+            throw new PoisonEventException("Record value is not valid UTF-8");
+        }
     }
 
-    private void process(String value, Set<String> allowedTypes) {
+    private void process(ConsumerRecord<String, byte[]> record, Set<String> allowedTypes) {
         InboundEvent event;
         try {
-            event = parser.parse(value, allowedTypes);
+            event = parser.parse(text(record), allowedTypes);
         } catch (PoisonEventException error) {
             metrics.consumed("unparsed", "dead_lettered");
-            LOG.warnv("Dead-lettering malformed event: {0}", error.getMessage());
+            LOG.warnv("Dead-lettering malformed event: topic={0} partition={1} offset={2} reason={3}", record.topic(),
+                    record.partition(), record.offset(), error.getMessage());
             throw error;
         }
-        Span span = tracer.spanBuilder("inventory.consume " + event.eventType()).setParent(extract(event.traceparent())).startSpan();
+        Span span = tracer.spanBuilder("inventory.consume " + event.eventType()).setParent(extract(event.traceparent()))
+                .setAttribute("box1.order_id", event.orderId()).startSpan();
         MDC.put("orderId", event.orderId());
         MDC.put("eventId", event.eventId().toString());
         MDC.put("eventType", event.eventType());
         MDC.put("correlationId", event.correlationId());
         try (Scope ignored = span.makeCurrent()) {
-            metrics.eventAge(Duration.between(event.occurredAt(), clock.instant()).toMillis() / 1000.0);
             if (event.occurredAt().isBefore(floor)) {
                 // Acknowledged with no effect and no dedupe record. See the offset policy in docs/runbook.md.
                 metrics.consumed(event.eventType(), "skipped_before_floor");
                 LOG.warn("Skipping an event older than the configured floor");
                 return;
             }
-            ReservationService.Applied applied = withRetries(reservations::apply, event);
-            if (applied.units() > 0) {
-                metrics.reserved(applied.siteId(), applied.units());
+            double age = Duration.between(event.occurredAt(), clock.instant()).toMillis() / 1000.0;
+            metrics.eventAge(age);
+            gate.observedEventAge(age);
+            try {
+                ReservationService.Applied applied = withRetries(reservations::apply, event);
+                if (applied.units() > 0) {
+                    metrics.reserved(applied.siteId(), applied.units());
+                }
+                if (applied.reason() != null) {
+                    metrics.rejected(applied.reason());
+                }
+                metrics.consumed(event.eventType(), applied.outcome());
+                LOG.infov("Event {0}", applied.outcome());
+            } catch (RuntimeException error) {
+                span.recordException(error);
+                metrics.consumed(event.eventType(), "dead_lettered");
+                LOG.warnv("Dead-lettering event: topic={0} partition={1} offset={2} error={3}", record.topic(), record.partition(),
+                        record.offset(), error.getClass().getSimpleName());
+                if (error instanceof PoisonEventException) {
+                    throw error;
+                }
+                // Fixed text: this message and any cause reach dead-letter headers.
+                throw new PoisonEventException("Retries exhausted");
             }
-            if (applied.reason() != null) {
-                metrics.rejected(applied.reason());
-            }
-            metrics.consumed(event.eventType(), applied.outcome());
-            LOG.infov("Event {0}", applied.outcome());
-        } catch (RuntimeException error) {
-            span.recordException(error);
-            metrics.consumed(event.eventType(), "dead_lettered");
-            LOG.warnv("Dead-lettering event: {0}", error.getClass().getSimpleName());
-            if (error instanceof PoisonEventException) {
-                throw error;
-            }
-            // Fixed text: this message and any cause reach dead-letter headers.
-            throw new PoisonEventException("Retries exhausted");
         } finally {
             span.end();
             MDC.remove("orderId");
@@ -138,26 +159,66 @@ public class OrderEventsConsumer {
         }
     }
 
+    /**
+     * Retries until the event applies. A database that cannot serve holds the channel without using up attempts, because
+     * no event is at fault and dead-lettering a good one would cost a healthy order. Everything else stays bounded.
+     */
     private <T, R> R withRetries(Function<T, R> action, T input) {
         long backoff = initialBackoffMillis;
-        for (int attempt = 1; ; attempt++) {
-            try {
-                return action.apply(input);
-            } catch (PoisonEventException error) {
-                throw error;
-            } catch (RuntimeException error) {
-                if (attempt >= maxAttempts) {
+        int attempt = 1;
+        boolean retried = false;
+        try {
+            while (true) {
+                try {
+                    return action.apply(input);
+                } catch (PoisonEventException error) {
                     throw error;
+                } catch (StoreException error) {
+                    if (error.isPermanent()) {
+                        throw new PoisonEventException("Value cannot be stored");
+                    }
+                    boolean holdsPosition = error.isUnavailable();
+                    if (!holdsPosition && attempt >= maxAttempts) {
+                        throw error;
+                    }
+                    if (error.isConflict()) {
+                        metrics.conflictRetry();
+                    }
+                    if (holdsPosition) {
+                        metrics.heldForDatabase();
+                    } else {
+                        attempt++;
+                    }
+                    retried = enterRetries(retried);
+                    backoff = retryPause(backoff, attempt, error);
+                } catch (RuntimeException error) {
+                    if (attempt >= maxAttempts) {
+                        throw error;
+                    }
+                    attempt++;
+                    retried = enterRetries(retried);
+                    backoff = retryPause(backoff, attempt, error);
                 }
-                metrics.retried();
-                if (error instanceof StoreException store && store.isConflict()) {
-                    metrics.conflictRetry();
-                }
-                LOG.warnv("Retrying event: attempt={0} error={1}", attempt, error.getClass().getSimpleName());
-                sleep(backoff);
-                backoff = Math.min(backoff * 2, maxBackoffMillis);
+            }
+        } finally {
+            if (retried) {
+                gate.retriesEnded();
             }
         }
+    }
+
+    private boolean enterRetries(boolean already) {
+        if (!already) {
+            gate.retrying();
+        }
+        return true;
+    }
+
+    private long retryPause(long backoff, int attempt, RuntimeException error) {
+        metrics.retried();
+        LOG.warnv("Retrying event: attempt={0} error={1}", attempt, error.getClass().getSimpleName());
+        sleep(backoff);
+        return Math.min(backoff * 2, maxBackoffMillis);
     }
 
     private static void sleep(long millis) {

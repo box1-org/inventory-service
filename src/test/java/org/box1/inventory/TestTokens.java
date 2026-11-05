@@ -69,6 +69,12 @@ public final class TestTokens implements QuarkusTestResourceLifecycleManager {
         return token("subject-key", ISSUER, "inventory-service", List.of("inventory-admin"), OTHER_KEYS);
     }
 
+    /** Signed correctly, with the role only in a top-level groups claim. */
+    static String groupsOnly() {
+        return Jwt.issuer(ISSUER).audience("inventory-service").subject("subject-groups")
+                .groups(java.util.Set.of("inventory-admin")).sign(KEYS.getPrivate());
+    }
+
     static String expired() {
         return Jwt.issuer(ISSUER).audience("inventory-service").subject("subject-expired").expiresAt(1000L)
                 .claim("resource_access", Map.of("inventory-service", Map.of("roles", List.of("inventory-admin"))))

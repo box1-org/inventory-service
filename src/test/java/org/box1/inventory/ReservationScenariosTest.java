@@ -545,6 +545,109 @@ class ReservationScenariosTest {
     }
 
     @Test
+    void aRepeatedLateShipmentTakesStockOnce() {
+        String sku = newSku(SITE, 5);
+        String orderId = newOrderId();
+        direct(Harness.placed(id(), orderId, SITE, sku, 2));
+        clock.advance(Duration.ofMinutes(16));
+        scheduler.expireDue();
+        clock.reset();
+        Harness.await("expired", () -> "EXPIRED".equals(status(orderId)));
+        assertEquals("reconciliation", direct(Harness.shipped(id(), orderId, "shp_late")).outcome());
+        assertEquals(3, onHand(SITE, sku));
+        assertEquals("duplicate_shipment", direct(Harness.shipped(id(), orderId, "shp_late")).outcome(), "the same shipment under a new eventId");
+        assertEquals(3, onHand(SITE, sku));
+        assertEquals("reconciliation", direct(Harness.shipped(id(), orderId, "shp_other")).outcome());
+        assertEquals(3, onHand(SITE, sku), "a different shipment for this hold is for a person, not a second deduction");
+        assertEquals(1, Harness.items(orderId, "SHIPMENT_DUPLICATE"));
+        assertEquals(1, count("SELECT count(*) FROM stock_movement WHERE site_id = ? AND sku = ? AND kind = 'LATE_SHIPMENT'", SITE, sku));
+    }
+
+    @Test
+    void aShipmentForAnotherRequestDoesNotConsumeACommittedHold() {
+        String sku = newSku(SITE, 5);
+        String orderId = newOrderId();
+        direct(Harness.placed(id(), orderId, SITE, sku, 2));
+        direct(Harness.requested(id(), orderId, Harness.reservationId(orderId), SITE, sku, 2));
+        String wrong = Harness.shipped(id(), orderId, "shp_x").replace("\"ful_", "\"ful_other_");
+        assertEquals("reconciliation", direct(wrong).outcome());
+        assertEquals("COMMITTED", status(orderId));
+        assertEquals(5, onHand(SITE, sku));
+        assertEquals(1, Harness.items(orderId, "SHIPMENT_REQUEST_MISMATCH"));
+    }
+
+    @Test
+    void historyRecordsTheTruePreviousStatus() {
+        String sku = newSku(SITE, 5);
+        String orderId = newOrderId();
+        direct(Harness.placed(id(), orderId, SITE, sku, 2));
+        direct(Harness.requested(id(), orderId, Harness.reservationId(orderId), SITE, sku, 2));
+        direct(Harness.shipped(id(), orderId, "shp_h"));
+        assertEquals("COMMITTED", Harness.text("SELECT from_status FROM reservation_history WHERE reservation_id = ? AND to_status = 'CONSUMED'", Harness.reservationId(orderId)));
+    }
+
+    @Test
+    void anUnavailableDatabaseHoldsPositionWithoutUsingAttempts() {
+        String sku = newSku(SITE, 5);
+        String orderId = newOrderId();
+        String eventId = id();
+        Harness.exec("CREATE OR REPLACE FUNCTION unavailable() RETURNS trigger AS $$ BEGIN"
+                + " IF NEW.event_id = '" + eventId + "' THEN RAISE EXCEPTION 'injected' USING ERRCODE = '57P03'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql");
+        Harness.exec("CREATE TRIGGER unavailable_trigger BEFORE INSERT ON processed_event FOR EACH ROW EXECUTE FUNCTION unavailable()");
+        try {
+            double before = metricTotal("box1_inventory_consumer_held_for_database_total");
+            send(ORDER_TOPIC, orderId, Harness.placed(eventId, orderId, SITE, sku, 2));
+            // The test bound is 5 attempts, so 8 retries prove attempts are not being used up.
+            Harness.await("more retries than the attempt bound", () -> metricTotal("box1_inventory_consumer_held_for_database_total") >= before + 8);
+            assertTrue(dlq(orderId).isEmpty(), "nothing dead-lettered");
+            assertEquals(0, count("SELECT count(*) FROM reservations WHERE order_id = ?", orderId));
+        } finally {
+            Harness.exec("DROP TRIGGER unavailable_trigger ON processed_event");
+        }
+        Harness.await("applied after the database returns", () -> "ACTIVE".equals(status(orderId)));
+        assertEquals(1, outcomes(orderId));
+    }
+
+    private static double metricTotal(String name) {
+        return given().when().get("/q/metrics").asString().lines().filter(l -> l.startsWith(name + " ") || l.startsWith(name + "{"))
+                .mapToDouble(l -> Double.parseDouble(l.split(" ")[1])).sum();
+    }
+
+    @Test
+    void aValueTheDatabaseCanNeverStoreIsDeadLetteredAtOnce() {
+        String sku = newSku(SITE, 5);
+        String orderId = newOrderId();
+        String eventId = id();
+        Harness.exec("CREATE OR REPLACE FUNCTION bad_value() RETURNS trigger AS $$ BEGIN"
+                + " IF NEW.event_id = '" + eventId + "' THEN RAISE EXCEPTION 'injected' USING ERRCODE = '22021'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql");
+        Harness.exec("CREATE TRIGGER bad_value_trigger BEFORE INSERT ON processed_event FOR EACH ROW EXECUTE FUNCTION bad_value()");
+        try {
+            double before = metricTotal("box1_event_retries_total");
+            send(ORDER_TOPIC, orderId, Harness.placed(eventId, orderId, SITE, sku, 2));
+            Harness.await("dead letter", () -> !dlq(orderId).isEmpty());
+            assertEquals("Value cannot be stored", new String(dlq(orderId).get(0).headers().lastHeader("dead-letter-reason").value(), StandardCharsets.UTF_8));
+            assertEquals(before, metricTotal("box1_event_retries_total"), "no retries");
+        } finally {
+            Harness.exec("DROP TRIGGER bad_value_trigger ON processed_event");
+        }
+    }
+
+    @Test
+    void invalidUtf8IsDeadLettered() {
+        String key = "utf8-" + UUID.randomUUID();
+        java.util.Properties config = new java.util.Properties();
+        config.put(org.apache.kafka.clients.producer.ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, FullStackResource.kafka.getBootstrapServers());
+        try (var producer = new org.apache.kafka.clients.producer.KafkaProducer<>(config,
+                new org.apache.kafka.common.serialization.StringSerializer(), new org.apache.kafka.common.serialization.ByteArraySerializer())) {
+            producer.send(new org.apache.kafka.clients.producer.ProducerRecord<>(ORDER_TOPIC, key, new byte[] {'{', (byte) 0xC3, (byte) 0x28, '}'})).get();
+        } catch (Exception error) {
+            throw new IllegalStateException(error);
+        }
+        Harness.await("dead letter", () -> !dlq(key).isEmpty());
+        assertEquals("Record value is not valid UTF-8", new String(dlq(key).get(0).headers().lastHeader("dead-letter-reason").value(), StandardCharsets.UTF_8));
+    }
+
+    @Test
     void shipmentEdgeCasesOpenReconciliationItems() {
         String sku = newSku(SITE, 5);
         String orderId = newOrderId();

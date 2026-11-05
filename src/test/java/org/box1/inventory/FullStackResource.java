@@ -34,6 +34,7 @@ public class FullStackResource implements QuarkusTestResourceLifecycleManager {
                 Map.entry("inventory.consumer.initial-backoff-millis", "20"),
                 Map.entry("inventory.consumer.max-attempts", "5"),
                 Map.entry("inventory.expiry.interval", "200ms"),
+                Map.entry("inventory.expiry.grace", "PT0S"),
                 Map.entry("inventory.metrics.refresh-interval", "1s"));
     }
 

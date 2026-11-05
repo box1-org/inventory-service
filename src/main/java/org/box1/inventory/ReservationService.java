@@ -96,7 +96,7 @@ public class ReservationService {
     private Applied requested(InboundEvent event, Instant now) {
         Optional<Reservation> hold = store.reservation(event.reservationId());
         if (hold.isEmpty() || !hold.get().orderId().equals(event.orderId())) {
-            store.reconciliation(event.orderId(), event.reservationId(), "FULFILLMENT_WITHOUT_RESERVATION", false, event.eventId(), now);
+            store.reconciliation(event.orderId(), event.reservationId(), "FULFILLMENT_WITHOUT_RESERVATION", false, null, event.eventId(), now);
             return Applied.of("reconciliation");
         }
         if (store.commit(event.reservationId(), event.fulfillmentRequestId(), now)) {
@@ -106,7 +106,7 @@ public class ReservationService {
         }
         ReservationStatus status = store.reservation(event.reservationId()).orElseThrow().status();
         if (status == ReservationStatus.EXPIRED || status == ReservationStatus.RELEASED) {
-            store.reconciliation(event.orderId(), event.reservationId(), "FULFILLMENT_AFTER_RELEASE", false, event.eventId(), now);
+            store.reconciliation(event.orderId(), event.reservationId(), "FULFILLMENT_AFTER_RELEASE", false, null, event.eventId(), now);
             return Applied.of("reconciliation");
         }
         return Applied.of("ignored");
@@ -128,42 +128,63 @@ public class ReservationService {
             return Applied.of("released");
         }
         if (store.reservation(value.reservationId()).orElseThrow().status() == ReservationStatus.COMMITTED) {
-            store.reconciliation(event.orderId(), value.reservationId(), "CANCELLED_AFTER_COMMIT", false, event.eventId(), now);
+            store.reconciliation(event.orderId(), value.reservationId(), "CANCELLED_AFTER_COMMIT", false, null, event.eventId(), now);
             return Applied.of("reconciliation");
         }
         return Applied.of("ignored");
     }
 
     private Applied shipped(InboundEvent event, Instant now) {
-        Optional<Reservation> hold = store.reservationForOrder(event.orderId());
+        Optional<Reservation> hold = store.lockForOrder(event.orderId());
         if (hold.isEmpty()) {
-            store.reconciliation(event.orderId(), null, "SHIPMENT_WITHOUT_RESERVATION", false, event.eventId(), now);
+            store.reconciliation(event.orderId(), null, "SHIPMENT_WITHOUT_RESERVATION", false, event.shipmentId(), event.eventId(), now);
             return Applied.of("reconciliation");
         }
         Reservation value = hold.get();
-        if (store.consume(value.reservationId(), event.shipmentId(), now)) {
-            store.consumeHold(value.siteId(), value.sku(), value.quantity(), now);
-            store.movement(value.siteId(), value.sku(), -value.quantity(), "SHIPMENT", CONSUMER, "SHIPMENT_CONFIRMED",
-                    event.shipmentId(), now);
-            store.history(value.reservationId(), value.status(), ReservationStatus.CONSUMED, CONSUMER, "SHIPMENT_CONFIRMED",
-                    event.eventId(), now);
-            return Applied.of("consumed");
-        }
-        Reservation current = store.reservation(value.reservationId()).orElseThrow();
-        if (current.status() == ReservationStatus.CONSUMED) {
-            if (event.shipmentId().equals(current.shipmentId())) {
-                return Applied.of("duplicate_shipment");
+        return switch (value.status()) {
+            case ACTIVE, COMMITTED -> consume(value, event, now);
+            case CONSUMED -> {
+                if (event.shipmentId().equals(value.shipmentId())) {
+                    yield Applied.of("duplicate_shipment");
+                }
+                store.reconciliation(event.orderId(), value.reservationId(), "SHIPMENT_DUPLICATE", false, event.shipmentId(), event.eventId(), now);
+                yield Applied.of("reconciliation");
             }
-            store.reconciliation(event.orderId(), value.reservationId(), "SHIPMENT_DUPLICATE", false, event.eventId(), now);
+            case EXPIRED, RELEASED -> lateShipment(value, event, now);
+        };
+    }
+
+    private Applied consume(Reservation value, InboundEvent event, Instant now) {
+        if (value.status() == ReservationStatus.COMMITTED && !event.fulfillmentRequestId().equals(value.fulfillmentRequestId())) {
+            // Not the request this hold is committed to. Order only notes this mismatch, so take nothing here either.
+            store.reconciliation(event.orderId(), value.reservationId(), "SHIPMENT_REQUEST_MISMATCH", false, event.shipmentId(), event.eventId(), now);
             return Applied.of("reconciliation");
         }
-        // The units physically left after the hold was given back, so count them if stock allows and leave a record.
+        store.consume(value.reservationId(), event.shipmentId(), now);
+        store.consumeHold(value.siteId(), value.sku(), value.quantity(), now);
+        store.movement(value.siteId(), value.sku(), -value.quantity(), "SHIPMENT", CONSUMER, "SHIPMENT_CONFIRMED",
+                event.shipmentId(), now);
+        store.history(value.reservationId(), value.status(), ReservationStatus.CONSUMED, CONSUMER, "SHIPMENT_CONFIRMED",
+                event.eventId(), now);
+        return Applied.of("consumed");
+    }
+
+    /** The units left after the hold was given back. Count them once if stock allows, and always leave a record. */
+    private Applied lateShipment(Reservation value, InboundEvent event, Instant now) {
+        InventoryStore.LateShipment known = store.lateShipment(value.reservationId(), event.shipmentId());
+        if (known.sameShipment()) {
+            return Applied.of("duplicate_shipment");
+        }
+        if (known.adjusted()) {
+            store.reconciliation(event.orderId(), value.reservationId(), "SHIPMENT_DUPLICATE", false, event.shipmentId(), event.eventId(), now);
+            return Applied.of("reconciliation");
+        }
         boolean adjusted = store.tryReduceOnHand(value.siteId(), value.sku(), value.quantity(), now);
         if (adjusted) {
             store.movement(value.siteId(), value.sku(), -value.quantity(), "LATE_SHIPMENT", CONSUMER, "SHIPMENT_AFTER_RELEASE",
                     event.shipmentId(), now);
         }
-        store.reconciliation(event.orderId(), value.reservationId(), "SHIPMENT_AFTER_RELEASE", adjusted, event.eventId(), now);
+        store.reconciliation(event.orderId(), value.reservationId(), "SHIPMENT_AFTER_RELEASE", adjusted, event.shipmentId(), event.eventId(), now);
         return Applied.of("reconciliation");
     }
 
@@ -171,10 +192,10 @@ public class ReservationService {
         if (event.retryable()) {
             return Applied.of("ignored");
         }
-        // Goods may have moved, so the hold stays until a person decides.
+        // Goods may have moved, so a person decides. A COMMITTED hold stays. An ACTIVE one can still expire on its TTL.
         Optional<Reservation> hold = store.reservationForOrder(event.orderId());
         store.reconciliation(event.orderId(), hold.map(Reservation::reservationId).orElse(null), "SHIPMENT_FAILED", false,
-                event.eventId(), now);
+                null, event.eventId(), now);
         return Applied.of("reconciliation");
     }
 
@@ -196,18 +217,20 @@ public class ReservationService {
     @Transactional
     public Reservation release(String reservationId, String subject, String reason) {
         Instant now = clock.instant();
-        Reservation hold = store.reservation(reservationId)
+        Reservation hold = store.lock(reservationId)
                 .orElseThrow(() -> new RequestProblem(404, "Not Found", "Reservation not found"));
-        if (store.release(reservationId, true, now)) {
-            store.returnHold(hold.siteId(), hold.sku(), hold.quantity(), now);
-            store.history(reservationId, hold.status(), ReservationStatus.RELEASED, subject, reason, null, now);
-            return store.reservation(reservationId).orElseThrow();
+        switch (hold.status()) {
+            case RELEASED -> {
+                return hold;
+            }
+            case ACTIVE, COMMITTED -> {
+                store.release(reservationId, true, now);
+                store.returnHold(hold.siteId(), hold.sku(), hold.quantity(), now);
+                store.history(reservationId, hold.status(), ReservationStatus.RELEASED, subject, reason, null, now);
+                return store.reservation(reservationId).orElseThrow();
+            }
+            default -> throw new RequestProblem(409, "Conflict", "Reservation is " + hold.status().name() + " and cannot be released");
         }
-        Reservation current = store.reservation(reservationId).orElseThrow();
-        if (current.status() == ReservationStatus.RELEASED) {
-            return current;
-        }
-        throw new RequestProblem(409, "Conflict", "Reservation is " + current.status().name() + " and cannot be released");
     }
 
     /** Add stock under an idempotency key. A repeat of the same request changes nothing. */

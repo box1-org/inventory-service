@@ -33,6 +33,7 @@ CREATE TABLE reservations (
 );
 CREATE INDEX ix_reservations_due ON reservations (expires_at) WHERE status = 'ACTIVE';
 CREATE INDEX ix_reservations_committed ON reservations (updated_at) WHERE status = 'COMMITTED';
+CREATE INDEX ix_reservations_held ON reservations (site_id, sku) WHERE status IN ('ACTIVE','COMMITTED');
 
 -- One decision per order, whatever happens later. A replay reads this and publishes nothing.
 CREATE TABLE order_outcome (
@@ -99,12 +100,16 @@ CREATE TABLE reconciliation_item (
     reservation_id text NULL,
     kind text NOT NULL,
     stock_adjusted boolean NOT NULL DEFAULT false,
+    shipment_id text NULL,
     event_id uuid NOT NULL,
     status text NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN','RESOLVED')),
     created_at timestamptz NOT NULL,
     UNIQUE (event_id, kind)
 );
 CREATE INDEX ix_reconciliation_open ON reconciliation_item (created_at) WHERE status = 'OPEN';
+-- One physical shipment must not take stock twice, so a released hold gets at most one automatic adjustment.
+CREATE UNIQUE INDEX ux_reconciliation_one_adjustment ON reconciliation_item (reservation_id)
+    WHERE kind = 'SHIPMENT_AFTER_RELEASE' AND stock_adjusted;
 
 CREATE TABLE outbox (
     seq bigint GENERATED ALWAYS AS IDENTITY UNIQUE,

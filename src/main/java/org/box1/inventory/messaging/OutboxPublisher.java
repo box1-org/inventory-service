@@ -149,6 +149,17 @@ public class OutboxPublisher {
     }
 
     private void fail(OutboxStore.Claimed row, Exception error) {
+        org.jboss.logging.MDC.put("orderId", row.aggregateId());
+        org.jboss.logging.MDC.put("eventId", row.eventId().toString());
+        try {
+            logFailure(row, error);
+        } finally {
+            org.jboss.logging.MDC.remove("orderId");
+            org.jboss.logging.MDC.remove("eventId");
+        }
+    }
+
+    private void logFailure(OutboxStore.Claimed row, Exception error) {
         String type = error instanceof ExecutionException && error.getCause() != null
                 ? error.getCause().getClass().getSimpleName() : error.getClass().getSimpleName();
         metrics.publishFailed();

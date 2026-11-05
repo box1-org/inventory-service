@@ -32,7 +32,7 @@ order.placed.v1 -> ACTIVE ---------------------> COMMITTED ---------------------
                      RELEASED
 ```
 
-- **Why the signal exists.** Order moves `FULFILLMENT_REQUESTED` to `EXCEPTION` on `inventory.reservation-expired.v1`. So a hold stops being able to expire once Order has requested fulfillment. Without that, a slow ERP would turn a healthy order into an exception.
+- **Why the signal exists.** Order moves `FULFILLMENT_REQUESTED` to `EXCEPTION` on `inventory.reservation-expired.v1`. So a hold stops being able to expire once Inventory has read Order's fulfillment request. Without that, a slow ERP would turn a healthy order into an exception. Expiry also waits while events may be unread: after startup, during and after a consumer retry, after a late event, and while the broker is unreachable.
 - **Why `ACTIVE` can go straight to `CONSUMED`.** Two topics have no mutual ordering, so a shipment can overtake the signal.
 - **Terminal states** are `CONSUMED`, `EXPIRED` and `RELEASED`. A confirmed shipment never releases stock. A shipment for an expired or released hold opens a reconciliation item, and reduces `on_hand` only if available covers it.
 
@@ -58,7 +58,7 @@ An injected `Clock` decides `expires_at`, what is due and `expiredAt`. Outbox cl
 | `/api/v1/inventory`, `/api/v1/reservations/{id}` | `INVENTORY_READ_POLICY`. Anything but an exact `permit` requires a valid token |
 | `/internal/v1/**` | Always needs a verified JWT with role `inventory-admin` under `resource_access.inventory-service.roles` |
 
-The service exposes every path through its Route, so the check is enforced in the service itself. It holds no client secret. It verifies signature, expiry, issuer and audience against the realm's public keys, and a key fetch failure rejects the request.
+The service exposes every path through its Route, so the check is enforced in the service itself, against that client's own claim. A top-level `groups` claim does not count. It holds no client secret. It verifies signature, expiry, issuer and audience against the realm's public keys, and a key fetch failure rejects the request.
 
 `customerId` arrives in `order.placed.v1`, and is checked for presence and otherwise dropped. It is not stored, logged or republished. Dead-letter records hold original values unchanged, so that topic is as sensitive as its source.
 
@@ -74,11 +74,18 @@ The service exposes every path through its Route, so the check is enforced in th
 | `box1_inventory_rejections_total{reason}` | Denials by reason |
 | `box1_inventory_conflict_retries_total` | Retries caused by a conflict |
 | `box1_event_retries_total` | All event retries |
-| `box1_event_age_seconds` | Age of an event on arrival |
+| `box1_event_age_seconds_count`, `_sum`, `_max` | Age of an event on arrival. Silent when the consumer is stalled, so see the runbook for lag |
 | `box1_inventory_reservations_expired_total` | Expired holds |
-| `box1_inventory_dlq_depth` | Records on the dead-letter topic |
+| `box1_inventory_dlq_depth` | Records on the dead-letter topic. `-1` means unknown |
+| `box1_inventory_expiry_held_total` | Expiry polls held back because events may be behind |
+| `box1_inventory_consumer_held_for_database_total` | Retries while the database could not serve |
+| `box1_inventory_metrics_refresh_failures_total{source}` | Failed gauge refreshes |
+| `box1_outbox_published_total`, `box1_outbox_publish_failures_total`, `box1_outbox_publish_lag_seconds_*` | Publisher results |
+| `box1_inventory_reservations_active`, `box1_inventory_reservations_committed` | Open holds |
 | `box1_events_consumed_total{type,outcome}` | Consumed events, including `skipped_before_floor` and `dead_lettered` |
 | `box1_outbox_pending`, `box1_outbox_oldest_pending_age_seconds` | Publishing backlog |
 | `box1_inventory_committed_oldest_age_seconds` | How long the oldest committed hold has waited |
 | `box1_inventory_reconciliation_open` | Items waiting for a person |
 | `box1_inventory_reserved_drift` | Stock rows whose `reserved` disagrees with their holds. Must be 0 |
+
+Counters appear only after their first increment. Dead-letter lines and the expiry causation are worth knowing when reading traces: `inventory.reservation-expired.v1` names the placing `order.placed.v1` as its `causationId`.

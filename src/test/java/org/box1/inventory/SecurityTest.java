@@ -63,6 +63,21 @@ class SecurityTest {
     }
 
     @Test
+    void aRoleOutsideTheClientClaimIsForbidden() {
+        rejected(403, TestTokens.groupsOnly(), RESTOCK);
+        rejected(403, TestTokens.groupsOnly(), RELEASE);
+    }
+
+    @Test
+    void anInvalidTokenOnAReadRouteIsRejected() {
+        for (String token : new String[] {"not-a-token", TestTokens.expired(), TestTokens.wrongKey()}) {
+            given().header("Authorization", "Bearer " + token).when().get("/api/v1/inventory").then().statusCode(401)
+                    .contentType(startsWith("application/problem+json"));
+            given().header("Authorization", "Bearer " + token).when().get("/api/v1/reservations/res_1").then().statusCode(401);
+        }
+    }
+
+    @Test
     void readsFailClosedByDefault() {
         given().when().get("/api/v1/inventory").then().statusCode(401).contentType(startsWith("application/problem+json"));
         given().when().get("/api/v1/reservations/res_1").then().statusCode(401);

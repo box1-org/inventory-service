@@ -9,7 +9,7 @@ Owner: `user:default/mike4263`. Quarkus 3.40.1.1, Java 21, Maven 3.9.16.
 - **Lifecycle and reason codes:** `INVENTORY-RESERVATIONS.md` in the contracts repository.
 - **Design and operations:** [docs/architecture.md](docs/architecture.md), [docs/runbook.md](docs/runbook.md).
 
-**The service will not start without `INVENTORY_ORDER_EVENTS_FLOOR`.** See [the offset policy](docs/runbook.md#first-start-offsets) before deploying it anywhere that has retained events.
+**The service will not start without `INVENTORY_ORDER_EVENTS_FLOOR`.** See [First deployment](docs/runbook.md#first-deployment) and [the offset policy](docs/runbook.md#first-start-offsets) before deploying it anywhere that has retained events.
 
 ## Local development
 

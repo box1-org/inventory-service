@@ -79,6 +79,7 @@ class ProcessRestartIT {
         builder.environment().put("INVENTORY_OUTBOX_LEASE_SECONDS", "5");
         builder.environment().put("INVENTORY_METRICS_REFRESH_INTERVAL", "1s");
         builder.environment().put("INVENTORY_EXPIRY_INTERVAL", "1s");
+        builder.environment().put("INVENTORY_EXPIRY_GRACE", "PT0S");
         builder.redirectErrorStream(true).redirectOutput(log.toFile());
         return builder;
     }
@@ -129,6 +130,7 @@ class ProcessRestartIT {
         refusesToStart(Map.of(), "inventory.consumer.order-events-floor");
         refusesToStart(Map.of("INVENTORY_ORDER_EVENTS_FLOOR", "yesterday"), "inventory.consumer.order-events-floor");
         refusesToStart(Map.of("INVENTORY_ORDER_EVENTS_FLOOR", Harness.FLOOR, "INVENTORY_RESERVATION_TTL", "soon"), "inventory.reservation.ttl");
+        refusesToStart(Map.of("INVENTORY_ORDER_EVENTS_FLOOR", "2999-01-01T00:00:00Z"), "is in the future");
     }
 
     @Test

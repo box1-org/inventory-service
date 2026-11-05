@@ -34,7 +34,8 @@ public class EventParser {
     private static final Pattern STATE = Pattern.compile("^[A-Z][A-Z_]{0,63}$");
     private static final Pattern REASON = Pattern.compile("^[A-Z][A-Z0-9_]{0,63}$");
     private static final Pattern TRACEPARENT = Pattern.compile("^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$");
-    private static final int MAX_ID = 128;
+    private static final Pattern BOUNDED_ID = Pattern.compile("^[^\\p{Cntrl}]{1,128}$");
+    private static final Pattern UUID_FORM = Pattern.compile("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$");
 
     private final ObjectMapper mapper;
 
@@ -45,7 +46,8 @@ public class EventParser {
     /** Parse a record value, or throw {@link PoisonEventException}. */
     public InboundEvent parse(String value, Set<String> allowedTypes) {
         JsonNode root = read(value);
-        if (root.path("schemaVersion").asInt(-1) != 1) {
+        JsonNode version = root.path("schemaVersion");
+        if (!version.isInt() || version.intValue() != 1) {
             throw new PoisonEventException("Unsupported schemaVersion");
         }
         UUID eventId = uuid(root);
@@ -137,11 +139,11 @@ public class EventParser {
     }
 
     private static UUID uuid(JsonNode root) {
-        try {
-            return UUID.fromString(text(root, "eventId"));
-        } catch (IllegalArgumentException error) {
+        String value = text(root, "eventId");
+        if (!UUID_FORM.matcher(value).matches()) {
             throw new PoisonEventException("Invalid eventId");
         }
+        return UUID.fromString(value);
     }
 
     private static String text(JsonNode node, String field) {
@@ -153,11 +155,7 @@ public class EventParser {
     }
 
     private static String bounded(JsonNode node, String field) {
-        String value = text(node, field);
-        if (value.length() > MAX_ID) {
-            throw new PoisonEventException("Oversized " + field);
-        }
-        return value;
+        return matching(node, field, BOUNDED_ID);
     }
 
     private static String matching(JsonNode node, String field, Pattern pattern) {

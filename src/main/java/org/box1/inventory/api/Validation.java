@@ -37,13 +37,13 @@ final class Validation {
     }
 
     static void reason(String value) {
-        if (value == null || value.isBlank() || value.length() > MAX_REASON) {
+        if (value == null || value.isBlank() || value.length() > MAX_REASON || value.chars().anyMatch(Character::isISOControl)) {
             throw badRequest("reason is required and must be 1 to 200 characters");
         }
     }
 
     static void key(String value) {
-        if (value == null || value.isEmpty() || value.length() > MAX_KEY) {
+        if (value == null || value.isEmpty() || value.length() > MAX_KEY || value.chars().anyMatch(Character::isISOControl)) {
             throw badRequest("Idempotency-Key is required and must be 1 to 255 characters");
         }
     }
