@@ -1,0 +1,6 @@
+site_name: inventory-service
+site_description: "The backend inventory service for box1 operations"
+nav:
+  - Home: index.md
+plugins:
+  - techdocs-core

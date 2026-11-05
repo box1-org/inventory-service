@@ -1,0 +1,149 @@
+---
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  labels:
+    backstage.io/kubernetes-id: inventory-service
+  generateName: "inventory-service-release-"
+  annotations:
+    pipelinesascode.tekton.dev/on-event: "[push]"
+    pipelinesascode.tekton.dev/on-target-branch: "[main]"
+    pipelinesascode.tekton.dev/target-namespace: box1-ci
+    pipelinesascode.tekton.dev/max-keep-runs: '10'
+spec:
+  taskRunTemplate:
+    serviceAccountName: ci-build
+  timeouts:
+    pipeline: 45m
+  params:
+  - name: revision
+    value: "{{revision}}"
+  - name: git-auth-secret
+    value: "{{git_auth_secret}}"
+  - name: security-gates
+    value: disabled
+  pipelineSpec:
+    params:
+    - name: revision
+      type: string
+    - name: git-auth-secret
+      type: string
+    - name: security-gates
+      type: string
+      default: disabled
+    tasks:
+    - name: build
+      taskRef:
+        resolver: cluster
+        params:
+        - name: kind
+          value: task
+        - name: name
+          value: box1-quarkus-maven
+        - name: namespace
+          value: box1-ci
+      params:
+      - name: revision
+        value: "$(params.revision)"
+      - name: git-auth-secret
+        value: "$(params.git-auth-secret)"
+      - name: push-image
+        value: 'true'
+      - name: source-repo
+        value: box1-org/inventory-service
+      - name: image-name
+        value: "inventory-service"
+    - name: security
+      runAfter:
+      - build
+      taskRef:
+        resolver: cluster
+        params:
+        - name: kind
+          value: task
+        - name: name
+          value: box1-security-gates
+        - name: namespace
+          value: box1-ci
+      params:
+      - name: image-reference
+        value: "image-registry.openshift-image-registry.svc:5000/box1-ci/inventory-service@$(tasks.build.results.image-digest)"
+      - name: image-digest
+        value: "$(tasks.build.results.image-digest)"
+      - name: source-revision
+        value: "$(params.revision)"
+      - name: source-repository
+        value: "box1-org/inventory-service"
+      - name: application-name
+        value: "inventory-service"
+      - name: pipeline-run
+        value: "$(context.pipelineRun.name)"
+      - name: enforcement
+        value: "$(params.security-gates)"
+      - name: rhtpa-secret
+        value: rhtpa-ci
+      - name: rhacs-secret
+        value: rhacs-ci
+    - name: promote
+      runAfter:
+      - security
+      taskRef:
+        resolver: cluster
+        params:
+        - name: kind
+          value: task
+        - name: name
+          value: box1-gitops-promote
+        - name: namespace
+          value: box1-ci
+      params:
+      - name: revision
+        value: "$(params.revision)"
+      - name: image-digest
+        value: "$(tasks.build.results.image-digest)"
+      - name: git-auth-secret
+        value: "$(params.git-auth-secret)"
+      - name: environment
+        value: development
+      - name: pipeline-run
+        value: "$(context.pipelineRun.name)"
+      - name: application-name
+        value: "inventory-service"
+    - name: smoke
+      runAfter:
+      - promote
+      when:
+      - input: "$(tasks.promote.results.promoted)"
+        operator: in
+        values:
+        - 'true'
+      taskRef:
+        resolver: cluster
+        params:
+        - name: kind
+          value: task
+        - name: name
+          value: box1-quarkus-smoke
+        - name: namespace
+          value: box1-ci
+      params:
+      - name: revision
+        value: "$(params.revision)"
+      - name: image-digest
+        value: "$(tasks.build.results.image-digest)"
+      - name: application-name
+        value: "inventory-service"
+      - name: application-namespace
+        value: "inventory-service-dev"
+    results:
+    - name: image-digest
+      value: "$(tasks.build.results.image-digest)"
+    - name: gitops-pr
+      value: "$(tasks.promote.results.pr-url)"
+    - name: gitops-revision
+      value: "$(tasks.promote.results.gitops-revision)"
+  taskRunSpecs:
+  - pipelineTaskName: promote
+    serviceAccountName: ci-gitops
+  - pipelineTaskName: smoke
+    serviceAccountName: ci-observe

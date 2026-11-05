@@ -1,0 +1,50 @@
+---
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  labels:
+    backstage.io/kubernetes-id: inventory-service
+  generateName: "inventory-service-validate-"
+  annotations:
+    pipelinesascode.tekton.dev/on-event: "[pull_request]"
+    pipelinesascode.tekton.dev/on-target-branch: "[main]"
+    pipelinesascode.tekton.dev/target-namespace: box1-ci
+    pipelinesascode.tekton.dev/max-keep-runs: '10'
+spec:
+  taskRunTemplate:
+    serviceAccountName: ci-test
+  timeouts:
+    pipeline: 45m
+  params:
+  - name: revision
+    value: "{{revision}}"
+  - name: git-auth-secret
+    value: "{{git_auth_secret}}"
+  pipelineSpec:
+    params:
+    - name: revision
+      type: string
+    - name: git-auth-secret
+      type: string
+    tasks:
+    - name: validate
+      taskRef:
+        resolver: cluster
+        params:
+        - name: kind
+          value: task
+        - name: name
+          value: box1-quarkus-maven
+        - name: namespace
+          value: box1-ci
+      params:
+      - name: revision
+        value: "$(params.revision)"
+      - name: git-auth-secret
+        value: "$(params.git-auth-secret)"
+      - name: push-image
+        value: 'false'
+      - name: source-repo
+        value: box1-org/inventory-service
+      - name: image-name
+        value: "inventory-service"
