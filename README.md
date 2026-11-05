@@ -1,15 +1,15 @@
 # inventory-service
 
-The backend inventory service for box1 operations
+Owns per-site SKU stock, available-to-promise, reservations, expiry and denial reasons for Box1 operations. It consumes `order.placed.v1` and publishes exactly one outcome per order. It never updates order records.
 
 Owner: `user:default/mike4263`. Quarkus 3.40.1.1, Java 21, Maven 3.9.16.
 
-Optional integrations selected at creation: PostgreSQL = `true`, Kafka = `true`.
-The integrations add their Quarkus extensions and GitOps resources. PostgreSQL creates a
-service-owned Deployment, Service, PVC, and Secret placeholder; replace its password before
-syncing. Kafka uses the separately managed shared `box1-kafka` Strimzi cluster; service
-onboarding does not create a `KafkaTopic`. The broker address is
-`box1-kafka-kafka-bootstrap.box1-kafka.svc:9092`.
+- **API contract:** `openapi/inventory-service.yaml` in [box1-ops-contracts](https://github.com/box1-org/box1-ops-contracts). Reads: `GET /api/v1/inventory?siteId=&sku=`, `GET /api/v1/reservations/{id}`. Operator routes under `/internal/v1` need a verified token with the `inventory-admin` role.
+- **Events:** consumes `box1.order.events.v1` and `box1.fulfillment.events.v1` as group `inventory`. Publishes to `box1.inventory.events.v1`, keyed by `orderId`. Dead letters go to `box1.inventory.dlq.v1`.
+- **Lifecycle and reason codes:** `INVENTORY-RESERVATIONS.md` in the contracts repository.
+- **Design and operations:** [docs/architecture.md](docs/architecture.md), [docs/runbook.md](docs/runbook.md).
+
+**The service will not start without `INVENTORY_ORDER_EVENTS_FLOOR`.** See [First deployment](docs/runbook.md#first-deployment) and [the offset policy](docs/runbook.md#first-start-offsets) before deploying it anywhere that has retained events.
 
 ## Local development
 
@@ -18,12 +18,17 @@ Install JDK 21 and use the included Maven wrapper:
 ```sh
 ./mvnw quarkus:dev
 ./mvnw verify -DskipITs=false -Dgit.ref="$(git rev-parse HEAD)"
+# With real PostgreSQL and Kafka, which CI does not have:
+./mvnw clean verify -Pcontainers -DskipITs=false
 curl http://localhost:8080/api/greetings?name=Ada
 curl http://localhost:8080/api/info
 ```
 
-Verification runs unit tests, HTTP tests, packaged JVM integration tests,
-Checkstyle, and SpotBugs/FindSecBugs. `/api/info` includes the immutable Git SHA
+Verification runs unit tests, HTTP tests, contract tests against the commit of
+`box1-ops-contracts` pinned in `pom.xml`, packaged JVM integration tests,
+Checkstyle, and SpotBugs/FindSecBugs. The failure scenarios are tagged `containers`,
+because the CI task has no container runtime, so they run only with `-Pcontainers`.
+With Podman, set `DOCKER_HOST` to its socket and `TESTCONTAINERS_RYUK_DISABLED=true`. `/api/info` includes the immutable Git SHA
 embedded in the image; local builds default to `unknown` unless supplied above.
 Java package `org.box1` is deliberately stable across generated services.
 
