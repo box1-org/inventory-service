@@ -21,7 +21,7 @@ spec:
   - name: git-auth-secret
     value: "{{git_auth_secret}}"
   - name: security-gates
-    value: disabled
+    value: gate
   pipelineSpec:
     params:
     - name: revision
