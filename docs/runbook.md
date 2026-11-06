@@ -135,7 +135,28 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/jso
 Both are recorded with the token's subject. Release returns 409 for a consumed or expired reservation.
 
 **Release tells Order nothing, because the contracts have no such event.** Order stays in `FULFILLMENT_REQUESTED`, and a request already sent can still ship, which then opens `SHIPMENT_AFTER_RELEASE`. So reconcile the order with its owner before releasing a `COMMITTED` hold.
- Fixture data comes only from Flyway migration `V2`. Until the client exists, the only way to change stock is a forward migration through a pull request.
+ The lab fixture comes from Flyway migration `V2`.
+
+### Creating sites and stock records
+
+Two create-once routes add sites and stock records, for example the scenario controller's demo fixtures (box1-docs#19). They never change or delete an existing site or record, so the `V2` lab fixture is safe from them.
+
+```sh
+curl -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"status":"ACTIVE","reason":"Fixture seed"}' \
+  https://inventory-service-dev.apps.ocp.box1.org/internal/v1/sites/site_spacedock
+
+curl -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"openingQuantity":500,"reason":"Fixture seed"}' \
+  https://inventory-service-dev.apps.ocp.box1.org/internal/v1/stock/site_spacedock/CAT-SPOT-BOWL
+```
+
+| Route | 201 | 200 | 409 | 404 |
+|---|---|---|---|---|
+| `PUT /internal/v1/sites/{siteId}` | Created | Exists with this status; nothing changed | Exists with another status | — |
+| `PUT /internal/v1/stock/{siteId}/{sku}` | Created with `openingQuantity` on hand | Opened earlier with the same quantity; returns the current level, nothing changed | Seeded record, or opened with another quantity | No such site |
+
+A site creation is recorded in the immutable `site_registration` table, and a stock record's opening quantity as an `OPENING` stock movement, both with the token's subject and reason. There is no route to change a site's status or remove anything: do that, if ever, with a reviewed forward migration.
 
 ## Reconciliation
 

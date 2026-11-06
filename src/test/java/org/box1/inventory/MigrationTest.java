@@ -24,7 +24,7 @@ class MigrationTest {
             Flyway flyway = Flyway.configure().dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
                     .locations("classpath:db/migration").load();
             MigrateResult first = flyway.migrate();
-            assertEquals(2, first.migrationsExecuted);
+            assertEquals(3, first.migrationsExecuted);
             assertEquals(0, flyway.migrate().migrationsExecuted, "rerun is a no-op");
             try (Connection c = DriverManager.getConnection(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
                     Statement s = c.createStatement()) {
@@ -39,6 +39,13 @@ class MigrationTest {
                 try (ResultSet r = s.executeQuery("SELECT count(*) FROM pg_indexes WHERE indexname = 'ix_reservations_due'")) {
                     r.next();
                     assertEquals(1, r.getInt(1));
+                }
+                assertThrows(java.sql.SQLException.class, () -> s.execute(
+                        "INSERT INTO stock_movement (site_id, sku, delta, kind, actor, reason, occurred_at)"
+                                + " VALUES ('site_nyc', 'SKU-42', 1, 'BOGUS', 'a', 'r', now())"), "movement kinds stay constrained");
+                try (ResultSet r = s.executeQuery("SELECT count(*) FROM inventory_site")) {
+                    r.next();
+                    assertEquals(3, r.getInt(1), "V3 adds no sites");
                 }
                 assertThrows(java.sql.SQLException.class, () -> s.execute(
                         "INSERT INTO reservations (reservation_id, order_id, site_id, sku, quantity, status, expires_at, placed_event_id, correlation_id, created_at, updated_at)"

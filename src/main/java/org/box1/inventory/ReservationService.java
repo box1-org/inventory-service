@@ -233,6 +233,41 @@ public class ReservationService {
         }
     }
 
+    /** Outcome of a create call: whether it created the resource, and the resource as it now is. */
+    public record Created<T>(boolean created, T value) {}
+
+    /**
+     * Create a site once. A repeat with the same status changes nothing; a different status is a conflict, because this
+     * route never changes an existing site.
+     */
+    @Transactional
+    public Created<String> createSite(String siteId, String status, String reason, String subject) {
+        if (store.createSite(siteId, status, subject, reason, clock.instant())) {
+            return new Created<>(true, status);
+        }
+        String existing = store.siteStatus(siteId).orElseThrow();
+        if (!existing.equals(status)) {
+            throw new RequestProblem(409, "Conflict", "Site exists with a different status");
+        }
+        return new Created<>(false, existing);
+    }
+
+    /**
+     * Create a stock record once with its opening quantity. A repeat with the same opening quantity changes nothing and
+     * returns the current level. A record that was seeded, or opened with another quantity, is a conflict.
+     */
+    @Transactional
+    public Created<StockLevel> createStock(String siteId, String sku, int openingQuantity, String reason, String subject) {
+        if (store.siteStatus(siteId).isEmpty()) {
+            throw new RequestProblem(404, "Not Found", "Site not found");
+        }
+        boolean created = store.createStock(siteId, sku, openingQuantity, subject, reason, clock.instant());
+        if (!created && !store.openingQuantity(siteId, sku).filter(q -> q == openingQuantity).isPresent()) {
+            throw new RequestProblem(409, "Conflict", "Stock record already exists");
+        }
+        return new Created<>(created, store.stock(siteId, sku, 1, 0).get(0));
+    }
+
     /** Add stock under an idempotency key. A repeat of the same request changes nothing. */
     @Transactional
     public StockLevel restock(String siteId, String sku, int quantity, String reason, String key, String subject) {

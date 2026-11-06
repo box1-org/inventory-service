@@ -374,6 +374,83 @@ public class InventoryStore {
         }
     }
 
+    /** Create a site. False means the site already exists, and nothing was changed. */
+    @Transactional(Transactional.TxType.MANDATORY)
+    public boolean createSite(String siteId, String status, String actor, String reason, Instant now) {
+        try (Connection c = dataSource.getConnection();
+                PreparedStatement s = c.prepareStatement(
+                        "INSERT INTO inventory_site (site_id, status) VALUES (?, ?) ON CONFLICT (site_id) DO NOTHING")) {
+            s.setString(1, siteId);
+            s.setString(2, status);
+            if (s.executeUpdate() == 0) {
+                return false;
+            }
+        } catch (SQLException error) {
+            throw new StoreException(error);
+        }
+        String sql = "INSERT INTO site_registration (site_id, status, actor, reason, occurred_at) VALUES (?, ?, ?, ?, ?)";
+        try (Connection c = dataSource.getConnection(); PreparedStatement s = c.prepareStatement(sql)) {
+            s.setString(1, siteId);
+            s.setString(2, status);
+            s.setString(3, actor);
+            s.setString(4, reason);
+            s.setTimestamp(5, Timestamp.from(now));
+            s.executeUpdate();
+            return true;
+        } catch (SQLException error) {
+            throw new StoreException(error);
+        }
+    }
+
+    /** A site's status, if the site exists. */
+    @Transactional(Transactional.TxType.MANDATORY)
+    public Optional<String> siteStatus(String siteId) {
+        try (Connection c = dataSource.getConnection();
+                PreparedStatement s = c.prepareStatement("SELECT status FROM inventory_site WHERE site_id = ?")) {
+            s.setString(1, siteId);
+            try (ResultSet r = s.executeQuery()) {
+                return r.next() ? Optional.of(r.getString(1)) : Optional.empty();
+            }
+        } catch (SQLException error) {
+            throw new StoreException(error);
+        }
+    }
+
+    /** Create a stock record with its opening quantity. False means the record already exists, and nothing was changed. */
+    @Transactional(Transactional.TxType.MANDATORY)
+    public boolean createStock(String siteId, String sku, int openingQuantity, String actor, String reason, Instant now) {
+        String sql = "INSERT INTO inventory_stock (site_id, sku, on_hand, updated_at) VALUES (?, ?, ?, ?)"
+                + " ON CONFLICT (site_id, sku) DO NOTHING";
+        try (Connection c = dataSource.getConnection(); PreparedStatement s = c.prepareStatement(sql)) {
+            s.setString(1, siteId);
+            s.setString(2, sku);
+            s.setInt(3, openingQuantity);
+            s.setTimestamp(4, Timestamp.from(now));
+            if (s.executeUpdate() == 0) {
+                return false;
+            }
+        } catch (SQLException error) {
+            throw new StoreException(error);
+        }
+        movement(siteId, sku, openingQuantity, "OPENING", actor, reason, null, now);
+        return true;
+    }
+
+    /** The opening quantity of a stock record created through the API; empty for seeded records. */
+    @Transactional(Transactional.TxType.MANDATORY)
+    public Optional<Integer> openingQuantity(String siteId, String sku) {
+        String sql = "SELECT delta FROM stock_movement WHERE site_id = ? AND sku = ? AND kind = 'OPENING'";
+        try (Connection c = dataSource.getConnection(); PreparedStatement s = c.prepareStatement(sql)) {
+            s.setString(1, siteId);
+            s.setString(2, sku);
+            try (ResultSet r = s.executeQuery()) {
+                return r.next() ? Optional.of(r.getInt(1)) : Optional.empty();
+            }
+        } catch (SQLException error) {
+            throw new StoreException(error);
+        }
+    }
+
     /** Add units to on hand. */
     @Transactional(Transactional.TxType.MANDATORY)
     public void addOnHand(String siteId, String sku, int quantity, Instant now) {

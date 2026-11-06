@@ -752,9 +752,72 @@ class ReservationScenariosTest {
 
     @Test
     void theSeedFixtureIsLoaded() {
-        assertEquals(3, count("SELECT count(*) FROM inventory_site"));
+        assertEquals(3, count("SELECT count(*) FROM inventory_site WHERE site_id NOT IN (SELECT site_id FROM site_registration)"));
         assertEquals(100, onHand("site_nyc", "SKU-42"));
         assertEquals(1, count("SELECT count(*) FROM stock_movement WHERE site_id = 'site_nyc' AND sku = 'SKU-42' AND kind = 'SEED' AND delta = 100"));
+    }
+
+    @Test
+    void sitesAndStockRecordsAreCreatedOnceAndNeverChanged() {
+        String token = TestTokens.admin("subject-seeder");
+        String site = "site_new_" + UUID.randomUUID().toString().substring(0, 8);
+        String body = "{\"status\":\"ACTIVE\",\"reason\":\"Fixture seed\"}";
+        given().contentType("application/json").body(body).when().put("/internal/v1/sites/" + site).then().statusCode(401);
+        given().contentType("application/json").header("Authorization", "Bearer " + token).body(body)
+                .when().put("/internal/v1/sites/" + site).then().statusCode(201).body("status", is("ACTIVE"));
+        given().contentType("application/json").header("Authorization", "Bearer " + token).body(body)
+                .when().put("/internal/v1/sites/" + site).then().statusCode(200).body("status", is("ACTIVE"));
+        given().contentType("application/json").header("Authorization", "Bearer " + token)
+                .body("{\"status\":\"UNAVAILABLE\",\"reason\":\"x\"}")
+                .when().put("/internal/v1/sites/" + site).then().statusCode(409);
+        given().contentType("application/json").header("Authorization", "Bearer " + token)
+                .body("{\"status\":\"UNAVAILABLE\",\"reason\":\"x\"}")
+                .when().put("/internal/v1/sites/site_closed").then().statusCode(200).body("status", is("UNAVAILABLE"));
+        given().contentType("application/json").header("Authorization", "Bearer " + token)
+                .body("{\"status\":\"UNAVAILABLE\",\"reason\":\"x\"}")
+                .when().put("/internal/v1/sites/site_nyc").then().statusCode(409);
+        assertEquals("ACTIVE", Harness.text("SELECT status FROM inventory_site WHERE site_id = 'site_nyc'"), "the lab seed is unchanged");
+        assertEquals(1, count("SELECT count(*) FROM site_registration WHERE site_id = ? AND actor = 'subject-seeder' AND reason = 'Fixture seed'", site));
+        assertEquals(0, count("SELECT count(*) FROM site_registration WHERE site_id IN ('site_nyc','site_closed')"));
+
+        String stock = "/internal/v1/stock/" + site + "/CAT-TEST";
+        String opening = "{\"openingQuantity\":1,\"reason\":\"Fixture seed\"}";
+        for (int expected : new int[] {201, 200}) {
+            given().contentType("application/json").header("Authorization", "Bearer " + token).body(opening)
+                    .when().put(stock).then().statusCode(expected).body("onHand", is(1)).body("available", is(1));
+        }
+        given().contentType("application/json").header("Authorization", "Bearer " + token)
+                .body("{\"openingQuantity\":2,\"reason\":\"x\"}").when().put(stock).then().statusCode(409);
+        assertEquals(1, onHand(site, "CAT-TEST"), "a repeat and a conflict change nothing");
+        assertEquals(1, count("SELECT count(*) FROM stock_movement WHERE site_id = ? AND kind = 'OPENING' AND actor = 'subject-seeder'", site));
+        given().contentType("application/json").header("Authorization", "Bearer " + token).body(opening)
+                .when().put("/internal/v1/stock/site_nyc/SKU-42").then().statusCode(409);
+        given().contentType("application/json").header("Authorization", "Bearer " + token).body(opening)
+                .when().put("/internal/v1/stock/site_unknown_x/CAT-TEST").then().statusCode(404);
+    }
+
+    @Test
+    void aCreatedRecordReservesLikeASeededOne() {
+        String token = TestTokens.admin("subject-seeder");
+        String site = "site_new_" + UUID.randomUUID().toString().substring(0, 8);
+        given().contentType("application/json").header("Authorization", "Bearer " + token)
+                .body("{\"status\":\"ACTIVE\",\"reason\":\"Fixture seed\"}").when().put("/internal/v1/sites/" + site).then().statusCode(201);
+        given().contentType("application/json").header("Authorization", "Bearer " + token)
+                .body("{\"openingQuantity\":1,\"reason\":\"Fixture seed\"}").when().put("/internal/v1/stock/" + site + "/CAT-LAST")
+                .then().statusCode(201);
+        String first = newOrderId();
+        String second = newOrderId();
+        direct(Harness.placed(id(), first, site, "CAT-LAST", 1));
+        direct(Harness.placed(id(), second, site, "CAT-LAST", 1));
+        assertEquals(1, reserved(site, "CAT-LAST"));
+        assertEquals(1, rejected(second));
+
+        String closed = "site_new_" + UUID.randomUUID().toString().substring(0, 8);
+        given().contentType("application/json").header("Authorization", "Bearer " + token)
+                .body("{\"status\":\"UNAVAILABLE\",\"reason\":\"Fixture seed\"}").when().put("/internal/v1/sites/" + closed).then().statusCode(201);
+        String refused = newOrderId();
+        direct(Harness.placed(id(), refused, closed, "CAT-LAST", 1));
+        assertEquals("SITE_UNAVAILABLE", Harness.text("SELECT reason_code FROM order_outcome WHERE order_id = ?", refused));
     }
 
     @Test

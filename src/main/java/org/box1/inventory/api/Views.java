@@ -26,4 +26,10 @@ public final class Views {
     public record Restock(Integer quantity, String reason) {}
 
     public record Release(String reason) {}
+
+    public record SiteRequest(String status, String reason) {}
+
+    public record Site(String siteId, String status) {}
+
+    public record StockRequest(Integer openingQuantity, String reason) {}
 }

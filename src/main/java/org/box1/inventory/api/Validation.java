@@ -36,6 +36,12 @@ final class Validation {
         }
     }
 
+    static void siteStatus(String value) {
+        if (!"ACTIVE".equals(value) && !"UNAVAILABLE".equals(value)) {
+            throw badRequest("status must be ACTIVE or UNAVAILABLE");
+        }
+    }
+
     static void reason(String value) {
         if (value == null || value.isBlank() || value.length() > MAX_REASON || value.chars().anyMatch(Character::isISOControl)) {
             throw badRequest("reason is required and must be 1 to 200 characters");

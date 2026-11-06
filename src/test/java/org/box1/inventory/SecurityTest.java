@@ -25,6 +25,36 @@ class SecurityTest {
         request.when().post(path).then().statusCode(status).contentType(startsWith("application/problem+json"));
     }
 
+    private static final String SITE = "/internal/v1/sites/site_test";
+    private static final String STOCK = "/internal/v1/stock/site_test/SKU-1";
+
+    private static void rejectedPut(int status, String token, String path, String body) {
+        var request = given().contentType("application/json").body(body);
+        if (token != null) {
+            request.header("Authorization", "Bearer " + token);
+        }
+        request.when().put(path).then().statusCode(status).contentType(startsWith("application/problem+json"));
+    }
+
+    @Test
+    void creationRoutesNeedTheRole() {
+        String site = "{\"status\":\"ACTIVE\",\"reason\":\"test\"}";
+        String stock = "{\"openingQuantity\":1,\"reason\":\"test\"}";
+        rejectedPut(401, null, SITE, site);
+        rejectedPut(401, null, STOCK, stock);
+        rejectedPut(401, TestTokens.wrongAudience(), SITE, site);
+        rejectedPut(403, TestTokens.viewer(), SITE, site);
+        rejectedPut(403, TestTokens.viewer(), STOCK, stock);
+        rejectedPut(403, TestTokens.groupsOnly(), STOCK, stock);
+        String admin = TestTokens.admin("subject-1");
+        rejectedPut(400, admin, SITE, "{\"status\":\"OPEN\",\"reason\":\"x\"}");
+        rejectedPut(400, admin, "/internal/v1/sites/nyc", site);
+        rejectedPut(400, admin, STOCK, "{\"openingQuantity\":-1,\"reason\":\"x\"}");
+        rejectedPut(400, admin, STOCK, "{\"openingQuantity\":1000001,\"reason\":\"x\"}");
+        rejectedPut(400, admin, STOCK, "{\"openingQuantity\":1}");
+        rejectedPut(400, admin, STOCK, "{\"openingQuantity\":1,\"reason\":\"x\",\"onHand\":5}");
+    }
+
     @Test
     void anonymousMutationIsRejected() {
         rejected(401, null, RESTOCK);
