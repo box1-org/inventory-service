@@ -6,6 +6,7 @@ import jakarta.annotation.security.RolesAllowed;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
@@ -46,6 +47,55 @@ public class AdminResource {
     public AdminResource(ReservationService reservations, JsonWebToken token) {
         this.reservations = reservations;
         this.token = token;
+    }
+
+    @PUT
+    @Path("/sites/{siteId}")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Operation(operationId = "createSite", summary = "Create a site once. Never changes an existing site. Authenticated and audited.")
+    @RequestBody(required = true, content = @Content(mediaType = MediaType.APPLICATION_JSON, schema = @Schema(implementation = Views.SiteRequest.class)))
+    @APIResponse(responseCode = "201", description = "Site created", content = @Content(mediaType = MediaType.APPLICATION_JSON, schema = @Schema(implementation = Views.Site.class)))
+    @APIResponse(responseCode = "200", description = "Site already exists with this status; nothing changed",
+            content = @Content(mediaType = MediaType.APPLICATION_JSON, schema = @Schema(implementation = Views.Site.class)))
+    @APIResponse(responseCode = "400", description = "Invalid request", content = @Content(mediaType = Problem.MEDIA_TYPE, schema = @Schema(implementation = Problem.class)))
+    @APIResponse(responseCode = "401", description = "No valid token", content = @Content(mediaType = Problem.MEDIA_TYPE, schema = @Schema(implementation = Problem.class)))
+    @APIResponse(responseCode = "403", description = "Token lacks the role", content = @Content(mediaType = Problem.MEDIA_TYPE, schema = @Schema(implementation = Problem.class)))
+    @APIResponse(responseCode = "409", description = "Site exists with a different status", content = @Content(mediaType = Problem.MEDIA_TYPE, schema = @Schema(implementation = Problem.class)))
+    public Response createSite(@PathParam("siteId") String siteId, Views.SiteRequest body) {
+        Validation.site(siteId);
+        if (body == null) {
+            throw Validation.badRequest("status must be ACTIVE or UNAVAILABLE");
+        }
+        Validation.siteStatus(body.status());
+        Validation.reason(body.reason());
+        var result = reservations.createSite(siteId, body.status(), body.reason(), token.getSubject());
+        LOG.infov("Site create requested: siteId={0}, created={1}", siteId, result.created());
+        return Response.status(result.created() ? 201 : 200).entity(new Views.Site(siteId, result.value())).build();
+    }
+
+    @PUT
+    @Path("/stock/{siteId}/{sku}")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Operation(operationId = "createStock", summary = "Create a stock record once with its opening quantity. Never changes an existing record.")
+    @RequestBody(required = true, content = @Content(mediaType = MediaType.APPLICATION_JSON, schema = @Schema(implementation = Views.StockRequest.class)))
+    @APIResponse(responseCode = "201", description = "Stock record created", content = @Content(mediaType = MediaType.APPLICATION_JSON, schema = @Schema(implementation = Views.Stock.class)))
+    @APIResponse(responseCode = "200", description = "Record already opened with this quantity; nothing changed. Returns the current level.",
+            content = @Content(mediaType = MediaType.APPLICATION_JSON, schema = @Schema(implementation = Views.Stock.class)))
+    @APIResponse(responseCode = "400", description = "Invalid request", content = @Content(mediaType = Problem.MEDIA_TYPE, schema = @Schema(implementation = Problem.class)))
+    @APIResponse(responseCode = "401", description = "No valid token", content = @Content(mediaType = Problem.MEDIA_TYPE, schema = @Schema(implementation = Problem.class)))
+    @APIResponse(responseCode = "403", description = "Token lacks the role", content = @Content(mediaType = Problem.MEDIA_TYPE, schema = @Schema(implementation = Problem.class)))
+    @APIResponse(responseCode = "404", description = "No such site", content = @Content(mediaType = Problem.MEDIA_TYPE, schema = @Schema(implementation = Problem.class)))
+    @APIResponse(responseCode = "409", description = "Record exists: seeded, or opened with another quantity", content = @Content(mediaType = Problem.MEDIA_TYPE, schema = @Schema(implementation = Problem.class)))
+    public Response createStock(@PathParam("siteId") String siteId, @PathParam("sku") String sku, Views.StockRequest body) {
+        Validation.site(siteId);
+        Validation.sku(sku);
+        if (body == null || body.openingQuantity() == null || body.openingQuantity() < 0 || body.openingQuantity() > MAX_RESTOCK) {
+            throw Validation.badRequest("openingQuantity must be 0 to 1000000");
+        }
+        Validation.reason(body.reason());
+        var result = reservations.createStock(siteId, sku, body.openingQuantity(), body.reason(), token.getSubject());
+        LOG.infov("Stock record create requested: siteId={0}, created={1}", siteId, result.created());
+        return Response.status(result.created() ? 201 : 200).entity(Views.Stock.of(result.value())).build();
     }
 
     @POST

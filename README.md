@@ -4,7 +4,7 @@ Owns per-site SKU stock, available-to-promise, reservations, expiry and denial r
 
 Owner: `user:default/mike4263`. Quarkus 3.40.1.1, Java 21, Maven 3.9.16.
 
-- **API contract:** `openapi/inventory-service.yaml` in [box1-ops-contracts](https://github.com/box1-org/box1-ops-contracts). Reads: `GET /api/v1/inventory?siteId=&sku=`, `GET /api/v1/reservations/{id}`. Operator routes under `/internal/v1` need a verified token with the `inventory-admin` role.
+- **API contract:** `openapi/inventory-service.yaml` in [box1-ops-contracts](https://github.com/box1-org/box1-ops-contracts). Reads: `GET /api/v1/inventory?siteId=&sku=`, `GET /api/v1/reservations/{id}`. Operator routes under `/internal/v1` (restock, release, and create-once sites and stock records) need a verified token with the `inventory-admin` role.
 - **Events:** consumes `box1.order.events.v1` and `box1.fulfillment.events.v1` as group `inventory`. Publishes to `box1.inventory.events.v1`, keyed by `orderId`. Dead letters go to `box1.inventory.dlq.v1`.
 - **Lifecycle and reason codes:** `INVENTORY-RESERVATIONS.md` in the contracts repository.
 - **Design and operations:** [docs/architecture.md](docs/architecture.md), [docs/runbook.md](docs/runbook.md).
