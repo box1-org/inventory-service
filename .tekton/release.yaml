@@ -184,6 +184,10 @@ spec:
       value: "$(tasks.promote.results.pr-url)"
     - name: gitops-revision
       value: "$(tasks.promote.results.gitops-revision)"
+    # Read by the OpenShift Pipelines console Vulnerabilities column. Emitted
+    # only when box1-security-gates produced a scan summary; otherwise "-".
+    - name: SCAN_OUTPUT
+      value: "$(tasks.security.results.SCAN_OUTPUT)"
   taskRunSpecs:
   - pipelineTaskName: promote
     serviceAccountName: ci-gitops
