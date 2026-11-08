@@ -1,0 +1,136 @@
+# OpenShift Dev Spaces workspace for inventory-service (box1-org/box1-docs#114).
+# Image and helper commands: box1-org/box1-devspaces. Runbook: box1-org/box1-docs.
+schemaVersion: 2.2.2
+metadata:
+  name: inventory-service
+  displayName: inventory-service
+components:
+  - name: tools
+    container:
+      # Box1 UDI (Dev Spaces UDI + JDK 21 default, JBang/Camel, Claude Code CLI, box1-* helpers).
+      # Bump by digest from the box1-devspaces release PipelineRun output.
+      image: image-registry.openshift-image-registry.svc:5000/box1-devtools/box1-udi@sha256:c3d29a29ae754af2544d052b87ec21d9ccea7dd5287a8cf4dc217d5512397310
+      memoryRequest: 2Gi
+      memoryLimit: 6Gi
+      cpuRequest: 500m
+      cpuLimit: "4"
+      mountSources: true
+      env:
+        - name: SERVICE_NAME
+          value: inventory-service
+        - name: JAVA_HOME
+          value: /usr/lib/jvm/java-21-openjdk
+        - name: MAVEN_OPTS
+          value: -Dmaven.repo.local=/home/user/.m2/repository
+      # Nothing is mounted inside /home/user: it is the persistent home (a subPath of the
+      # per-user PVC), and nested mounts there blocked workspace deletion on the node.
+      # ~/.m2 persists with the home; podman storage is ephemeral (CONTAINERS_STORAGE_CONF).
+      volumeMounts:
+        - name: container-storage
+          path: /var/lib/box1-containers
+      endpoints:
+        - name: quarkus-dev
+          targetPort: 8080
+          exposure: public
+          protocol: https
+          path: /q/swagger-ui
+        - name: debug
+          targetPort: 5005
+          exposure: none
+  - name: container-storage
+    volume:
+      ephemeral: true
+      size: 8Gi
+commands:
+  - id: test
+    exec:
+      label: "1. Test: Maven unit tests"
+      component: tools
+      workingDir: ${PROJECT_SOURCE}
+      commandLine: ./mvnw -B test
+      group:
+        kind: test
+        isDefault: true
+  - id: quarkus-dev
+    exec:
+      label: "2. Run: Quarkus dev mode in the workspace (debug on localhost:5005)"
+      component: tools
+      workingDir: ${PROJECT_SOURCE}
+      commandLine: ./mvnw quarkus:dev -Dquarkus.http.host=0.0.0.0 -Ddebug=5005
+      group:
+        kind: run
+        isDefault: true
+  - id: pipeline-validate
+    exec:
+      label: "3. Tekton: run the PR validation pipeline for the pushed HEAD"
+      component: tools
+      workingDir: ${PROJECT_SOURCE}
+      commandLine: box1-pipeline validate && box1-pipeline logs
+      group:
+        kind: build
+  - id: pipeline-logs
+    exec:
+      label: "3. Tekton: follow the latest pipeline run"
+      component: tools
+      workingDir: ${PROJECT_SOURCE}
+      commandLine: box1-pipeline logs
+  - id: pipeline-list
+    exec:
+      label: "3. Tekton: list recent pipeline runs"
+      component: tools
+      workingDir: ${PROJECT_SOURCE}
+      commandLine: box1-pipeline list
+  - id: remote-dev-deploy
+    exec:
+      label: "4. Remote dev: deploy uncommitted code to my sandbox"
+      component: tools
+      workingDir: ${PROJECT_SOURCE}
+      commandLine: box1-remote-dev deploy
+      group:
+        kind: build
+        isDefault: true
+  - id: remote-dev-sync
+    exec:
+      label: "4. Remote dev: live-sync changes to my sandbox"
+      component: tools
+      workingDir: ${PROJECT_SOURCE}
+      commandLine: box1-remote-dev sync
+      group:
+        kind: run
+  - id: remote-dev-delete
+    exec:
+      label: "4. Remote dev: delete my sandbox deployment"
+      component: tools
+      workingDir: ${PROJECT_SOURCE}
+      commandLine: box1-remote-dev delete
+  - id: debug-sandbox
+    exec:
+      label: "5. Debug: forward my sandbox JVM to localhost:5005"
+      component: tools
+      workingDir: ${PROJECT_SOURCE}
+      commandLine: box1-debug sandbox
+      group:
+        kind: debug
+        isDefault: true
+  - id: debug-dev
+    exec:
+      label: "5. Debug: forward the inventory-service-dev JVM to localhost:5005 (jvm-debug component required)"
+      component: tools
+      workingDir: ${PROJECT_SOURCE}
+      commandLine: box1-debug dev
+      group:
+        kind: debug
+  - id: podman-socket
+    exec:
+      label: "7. Containers: start the podman API for Testcontainers (-Pcontainers)"
+      component: tools
+      # Never fails the workspace start (older images lack the helper; container run may be off).
+      commandLine: 'box1-podman-socket start || echo "podman API not started, see box1-podman-socket status"'
+  - id: hawtio
+    exec:
+      label: "6. Hawtio: print the Hawtio Online console URL"
+      component: tools
+      commandLine: echo "https://$(oc get route -n hawtio -o jsonpath='{.items[0].spec.host}')"
+events:
+  postStart:
+    - podman-socket

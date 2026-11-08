@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-service-remote-dev
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: inventory-service-remote-dev
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: inventory-service-remote-dev
+      annotations:
+        # Resolve "inventory-service:remote-dev" from the sandbox ImageStream that Jib pushes to.
+        alpha.image.policy.openshift.io/resolve-names: "*"
+        box1.org/jvm-debug: enabled
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: application
+          image: inventory-service:remote-dev
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: QUARKUS_LAUNCH_DEVMODE
+              value: "true"
+            # Dev Services would try to start Testcontainers inside the pod; dependencies are explicit here.
+            - name: QUARKUS_DEVSERVICES_ENABLED
+              value: "false"
+            - name: QUARKUS_LIVE_RELOAD_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: inventory-service-remote-dev-live-reload
+                  key: password
+            # JDWP on localhost only: attach with `box1-debug sandbox` (oc port-forward).
+            - name: _JAVA_OPTIONS
+              value: -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=127.0.0.1:5005
+            - name: JAVA_TOOL_OPTIONS
+              value: -XX:MaxRAMPercentage=50.0 -Djava.io.tmpdir=/tmp
+            # Throwaway PostgreSQL in the sandbox (postgres.yaml), never the dev database.
+            - name: QUARKUS_DATASOURCE_JDBC_URL
+              value: jdbc:postgresql://inventory-service-remote-dev-postgres:5432/inventory_service
+            - name: QUARKUS_DATASOURCE_USERNAME
+              value: inventory_service
+            - name: QUARKUS_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: inventory-service-remote-dev-live-reload
+                  key: password
+            # Isolated from shared Kafka: an unreachable broker keeps the sandbox from
+            # consuming inventory-service-dev's events or publishing into shared topics.
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: localhost:9092
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          # Liveness, not readiness: readiness may include dependencies (e.g. Kafka) that
+          # are deliberately unreachable in the sandbox.
+          readinessProbe:
+            httpGet:
+              path: /q/health/live
+              port: http
+            periodSeconds: 5
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            # Remote dev rewrites the application jars in place, so unlike the
+            # Argo-managed Deployment the root filesystem stays writable here.
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: [ALL]

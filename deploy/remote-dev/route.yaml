@@ -1,0 +1,15 @@
+# Remote dev pushes changes over this Route; the endpoint is protected by the
+# per-sandbox live-reload password Secret created by `box1-remote-dev deploy`.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: inventory-service-remote-dev
+spec:
+  to:
+    kind: Service
+    name: inventory-service-remote-dev
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
