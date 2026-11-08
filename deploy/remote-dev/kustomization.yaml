@@ -1,0 +1,15 @@
+# Quarkus remote dev in your sandbox namespace, applied by `box1-remote-dev deploy`
+# from a Dev Spaces workspace (box1-org/box1-docs#114). Not used by Argo CD and
+# never applied to inventory-service-dev. The namespace comes from `oc apply -n`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+labels:
+  - pairs:
+      box1.org/remote-dev: "true"
+    includeSelectors: false
+    includeTemplates: true
+resources:
+  - deployment.yaml
+  - service.yaml
+  - route.yaml
+  - postgres.yaml
