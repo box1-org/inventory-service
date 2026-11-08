@@ -2,6 +2,6 @@
   "id": "80999d8b-a4ec-4afc-b1de-71900fbc01f7",
   "name": "inventory-service",
   "namespace": "inventory-service-dev",
-  "owner": "user:default/mike4263",
+  "owner": "user:default/mike",
   "templateVersion": "1.1.0"
 }
