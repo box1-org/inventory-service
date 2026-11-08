@@ -35,7 +35,7 @@ metadata:
 spec:
   type: service
   lifecycle: experimental
-  owner: "user:default/mike4263"
+  owner: "user:default/mike"
   # Add when the corresponding System entity exists:
   # system: box1-demo
   providesApis:
@@ -58,7 +58,7 @@ metadata:
 spec:
   type: openapi
   lifecycle: experimental
-  owner: "user:default/mike4263"
+  owner: "user:default/mike"
   definition:
     $text: https://inventory-service-dev.apps.ocp.box1.org/q/openapi
 ---
@@ -76,7 +76,7 @@ metadata:
 spec:
   type: asyncapi
   lifecycle: experimental
-  owner: "user:default/mike4263"
+  owner: "user:default/mike"
   definition: |
     asyncapi: 2.6.0
     info:
@@ -120,4 +120,4 @@ metadata:
 spec:
   type: database
   lifecycle: experimental
-  owner: "user:default/mike4263"
+  owner: "user:default/mike"

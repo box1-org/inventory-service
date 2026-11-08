@@ -1,6 +1,6 @@
 # Ownership
 
-Catalog owner: `user:default/mike4263`.
+Catalog owner: `user:default/mike`.
 
 Application code and tests belong to this owner. Platform maintainers own shared
 Tekton Tasks and onboarding permissions. Deployment changes belong in
