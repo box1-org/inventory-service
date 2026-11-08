@@ -40,6 +40,14 @@ spec:
   # system: box1-demo
   providesApis:
     - inventory-service-api
+    - box1-inventory-events
+  consumesApis:
+    - box1-order-events
+    - box1-fulfillment-events
+  dependsOn:
+    - resource:inventory-service-postgres
+    - resource:box1-kafka
+    - resource:keycloak-box1
 ---
 apiVersion: backstage.io/v1alpha1
 kind: API
@@ -53,3 +61,63 @@ spec:
   owner: "user:default/mike4263"
   definition:
     $text: https://inventory-service-dev.apps.ocp.box1.org/q/openapi
+---
+apiVersion: backstage.io/v1alpha1
+kind: API
+metadata:
+  name: box1-inventory-events
+  title: box1.inventory.events.v1
+  description: Kafka topic box1.inventory.events.v1, produced by inventory-service through its transactional outbox. Contracts are owned by box1-ops-contracts.
+  tags: [kafka, events, asyncapi]
+  links:
+    - url: https://github.com/box1-org/box1-ops-contracts/blob/main/TOPICS.md
+      title: Topic ownership and consumer groups
+      icon: docs
+spec:
+  type: asyncapi
+  lifecycle: experimental
+  owner: "user:default/mike4263"
+  definition: |
+    asyncapi: 2.6.0
+    info:
+      title: box1.inventory.events.v1
+      version: v1
+      description: >-
+        Delivery is at least once; consumers record eventId transactionally.
+        Partition key orderId. Retention 7d.
+    servers:
+      dev:
+        url: box1-kafka-kafka-bootstrap.box1-kafka.svc:9092
+        protocol: kafka
+    channels:
+      box1.inventory.events.v1:
+        publish:
+          summary: Events published by inventory-service
+          message:
+            oneOf:
+            - name: inventory.reserved.v1
+              title: inventory.reserved.v1
+              summary: v1 envelope carrying inventory.reserved (see https://github.com/box1-org/box1-ops-contracts/blob/main/events/v1/inventory.reserved.schema.json)
+              contentType: application/json
+            - name: inventory.rejected.v1
+              title: inventory.rejected.v1
+              summary: v1 envelope carrying inventory.rejected (see https://github.com/box1-org/box1-ops-contracts/blob/main/events/v1/inventory.rejected.schema.json)
+              contentType: application/json
+            - name: inventory.reservation-expired.v1
+              title: inventory.reservation-expired.v1
+              summary: v1 envelope carrying inventory.reservation-expired (see https://github.com/box1-org/box1-ops-contracts/blob/main/events/v1/inventory.reservation-expired.schema.json)
+              contentType: application/json
+---
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: inventory-service-postgres
+  description: PostgreSQL database inventory_service owned by inventory-service (inventory-service-dev namespace)
+  tags: [postgresql, database]
+  links:
+    - url: https://github.com/box1-org/box1-workloads-dev/blob/main/workloads/inventory-service/postgres.yaml
+      title: Database manifest
+spec:
+  type: database
+  lifecycle: experimental
+  owner: "user:default/mike4263"
