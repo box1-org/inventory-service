@@ -163,7 +163,7 @@ public class ReservationService {
         store.consume(value.reservationId(), event.shipmentId(), now);
         store.consumeHold(value.siteId(), value.sku(), value.quantity(), now);
         store.movement(value.siteId(), value.sku(), -value.quantity(), "SHIPMENT", CONSUMER, "SHIPMENT_CONFIRMED",
-                event.shipmentId(), now);
+                event.shipmentId(), now, event.shippedAt());
         store.history(value.reservationId(), value.status(), ReservationStatus.CONSUMED, CONSUMER, "SHIPMENT_CONFIRMED",
                 event.eventId(), now);
         return Applied.of("consumed");
@@ -182,7 +182,7 @@ public class ReservationService {
         boolean adjusted = store.tryReduceOnHand(value.siteId(), value.sku(), value.quantity(), now);
         if (adjusted) {
             store.movement(value.siteId(), value.sku(), -value.quantity(), "LATE_SHIPMENT", CONSUMER, "SHIPMENT_AFTER_RELEASE",
-                    event.shipmentId(), now);
+                    event.shipmentId(), now, event.shippedAt());
         }
         store.reconciliation(event.orderId(), value.reservationId(), "SHIPMENT_AFTER_RELEASE", adjusted, event.shipmentId(), event.eventId(), now);
         return Applied.of("reconciliation");

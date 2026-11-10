@@ -5,7 +5,7 @@
 | Check | Meaning |
 |---|---|
 | `/q/health/live` | The process is running. Stays up during broker and database outages. Goes down if the dead-letter topic cannot accept a poison record, because the channel stops. The pod then restarts and the record redelivers until the topic is available. |
-| `/q/health/ready` | PostgreSQL is reachable. Kafka is deliberately excluded, so reads continue during a broker outage. |
+| `/q/health/ready` | PostgreSQL is reachable. Kafka is deliberately excluded, so reads continue during a broker outage. A missing `box1.site.events.v1` topic does not affect it either. |
 
 ## Configuration
 
@@ -28,6 +28,8 @@ Set in `workloads/inventory-service/` in `box1-workloads-dev`.
 | `INVENTORY_CONSUMER_MAX_ATTEMPTS` | `20` | Attempts before dead-lettering. A database that cannot serve uses none. |
 | `INVENTORY_CONSUMER_INITIAL_BACKOFF_MILLIS`, `INVENTORY_CONSUMER_MAX_BACKOFF_MILLIS` | `500`, `30000` | Retry delay, doubling to the cap |
 | `INVENTORY_JWKS_URL`, `INVENTORY_JWT_ISSUER` | Keycloak realm `box1` | Token verification |
+
+Site events use fixed properties in `application.properties`, not environment variables: `inventory.site.topic` (`box1.site.events.v1`), `inventory.site.group` (`inventory-site`) and `inventory.site.dlq.topic` (`box1.site.dlq.v1`). They share `INVENTORY_CONSUMER_MAX_ATTEMPTS` and the backoff settings above. `INVENTORY_ORDER_EVENTS_FLOOR` does not apply to them.
 
 Put a change that must not orphan a ConfigMap in the Deployment's `env`, not the generated ConfigMap. Changing a `configMapGenerator` literal leaves the old hashed ConfigMap behind, Argo reports `OutOfSync`, and a release then fails at promote (box1-docs#42).
 
@@ -61,10 +63,24 @@ Before a first deploy against a topic with retained events:
 
 Lowering the floor later does not rewind committed offsets. To process excluded events, reset the group's offsets too, and only with the Order owner's agreement, because each outcome moves a live order.
 
+## Site topics and first start
+
+`box1.site.events.v1` and `box1.site.dlq.v1` are `KafkaTopic`s in `box1-gitops` (`platform/kafka/topics/`), owned by the platform, not by this service. Create them before, or soon after, a release that contains the site consumer:
+
+- **Topic missing:** the `site-events` consumer subscribes and waits; the Kafka client logs `UNKNOWN_TOPIC_OR_PARTITION` warnings. The pod stays live and Ready, the order consumers and reads are unaffected, and nothing is lost, because nothing can have been published to a topic that does not exist. The consumer sets `allow.auto.create.topics=false`, so it never makes the broker create the topic with default settings. Once the topic exists, the consumer is assigned its partitions on the next metadata refresh and starts from the earliest offset.
+- **Dead-letter topic missing:** the broker has `auto.create.topics.enable` at its default (`true`), so the first poison site record creates `box1.site.dlq.v1` with broker defaults (1 partition, broker retention). Strimzi adopts it when the `KafkaTopic` arrives, but cannot reduce partitions. Create the dead-letter topic first.
+
+Group `inventory-site` starts from the **earliest** retained offset and has no floor: every retained site event is applied once, which is the intent, because a site that was offline publishes its actions late with their original times. Before a first deploy against a site topic that already holds test events, read it (the command below with `--topic box1.site.events.v1`), and if any must not apply, ask before resetting the group's offsets past them.
+
+```sh
+oc -n box1-kafka exec box1-kafka-box1-kafka-0 -- bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic box1.site.events.v1
+```
+
 ## Consumer lag
 
 ```sh
 oc -n box1-kafka exec box1-kafka-box1-kafka-0 -- bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group inventory
+oc -n box1-kafka exec box1-kafka-box1-kafka-0 -- bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group inventory-site
 ```
 
 `box1_event_age_seconds` records only when a record arrives, so a stalled consumer shows nothing in it. Use this command, or the Kafka client lag meters on `/q/metrics`. No scrape is configured, so metrics here mean reading `/q/metrics`, and values reset on restart.
@@ -89,7 +105,7 @@ Consumption resumes when the broker expires the dead member's session, about 45 
 
 **Signal:** readiness returns 503, and the Route stops sending traffic. `box1_inventory_consumer_held_for_database_total` rises, and gauges keep their last values while `box1_inventory_metrics_refresh_failures_total{source="database"}` rises.
 
-Consumers hold position for as long as the database cannot serve, retrying at most every 30 seconds. They use up no attempts, so valid events are not dead-lettered. Expiry waits until the grace after recovery. If the pod restarts while the database is down, Flyway fails at startup and the pod crash-loops until the database returns.
+Consumers, including `inventory-site`, hold position for as long as the database cannot serve, retrying at most every 30 seconds. They use up no attempts, so valid events are not dead-lettered. Expiry waits until the grace after recovery. If the pod restarts while the database is down, Flyway fails at startup and the pod crash-loops until the database returns.
 
 Other database errors are bounded. A value that can never be stored goes to the dead-letter topic at once. Anything else goes there after 20 attempts, about 7 minutes.
 
@@ -117,6 +133,31 @@ A dead-lettered event has its effects delayed. **A dead-lettered `fulfillment.re
    ```
 
 5. Confirm it applied: `box1_events_consumed_total` for that type rises, and the reservation or order has the expected state. `box1_inventory_dlq_depth` does not fall.
+
+### Site dead letters (`box1.site.dlq.v1`)
+
+**Tested against a local broker only.** Records the `inventory-site` group could not process, unchanged, with the same `dead-letter-reason` and `dead-letter-topic` headers; `box1_inventory_site_dlq_depth` counts them. Reasons are `Record value is not valid JSON` or `... UTF-8`, a named envelope or payload field (`Invalid countedQuantity`, `aggregateId does not match siteId`, `Unsupported schemaVersion`, ...), `Value cannot be stored`, or `Retries exhausted`. A database outage never dead-letters a valid site event. Records carry no customer data, but do carry site, order and SKU identifiers.
+
+A dead-lettered pick only delays its audit record. A dead-lettered count leaves `on_hand` at its previous value until replayed; replaying it later still gives the right result, because the rule uses `countedAt`, not arrival time, and a later count already applied simply supersedes it.
+
+1. Record who is replaying, why, and the time, as above.
+2. Read the topic, with partition and offset:
+
+   ```sh
+   oc -n box1-kafka exec box1-kafka-box1-kafka-0 -- bin/kafka-console-consumer.sh \
+     --bootstrap-server localhost:9092 --topic box1.site.dlq.v1 --from-beginning \
+     --property print.key=true --property print.headers=true --property print.partition=true --property print.offset=true --timeout-ms 10000
+   ```
+
+3. Fix the cause. A malformed record cannot be replayed as it stands: fix the producing site (`box1-org/site-gateway`), which re-sends from its outbox with the same `eventId`. Do not edit a business payload.
+4. To replay a record that failed for a transient reason (`Retries exhausted`), re-produce it to `box1.site.events.v1` with the same key (the `siteId`) and value. **Producing to a shared topic needs approval.** Replay is safe to repeat: `eventId`, `pickId`, `countId` and the hold transition each stop a second effect.
+
+   ```sh
+   oc -n box1-kafka exec -i box1-kafka-box1-kafka-0 -- bin/kafka-console-producer.sh --bootstrap-server localhost:9092 \
+     --topic box1.site.events.v1 --property parse.key=true --property "key.separator=$(printf '\t')" < record.txt
+   ```
+
+5. Confirm it applied: `GET /api/v1/site-events?siteId=<siteId>` shows the decision, and `box1_events_consumed_total{type="site..."}` rises.
 
 ## Stock and reservation operations
 
@@ -160,7 +201,17 @@ A site creation is recorded in the immutable `site_registration` table, and a st
 
 ## Reconciliation
 
-`box1_inventory_reconciliation_open` counts rows in `reconciliation_item`. Inventory opened each because it could not resolve a fact alone. No tooling resolves them in v1.
+`box1_inventory_reconciliation_open` counts rows in `reconciliation_item`. Inventory opened each because it could not resolve a fact alone. No tooling marks them `RESOLVED` in v1; the operations console does not show them yet.
+
+Read them, newest first, with any token the read policy accepts:
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" 'https://inventory-service-dev.apps.ocp.box1.org/api/v1/reconciliation-items?status=OPEN&limit=50'
+curl -H "Authorization: Bearer $TOKEN" 'https://inventory-service-dev.apps.ocp.box1.org/api/v1/reconciliation-items?kind=COUNT_CONFLICT&siteId=site_ds9'
+curl -H "Authorization: Bearer $TOKEN" 'https://inventory-service-dev.apps.ocp.box1.org/api/v1/site-events?siteId=site_ds9&type=COUNT'
+```
+
+Filters: `status`, `kind`, `siteId`, `orderId`, `limit` (1–100), `offset`. Order-flow items carry `orderId`; site count and hold items carry `siteId`, `sku` and `detail`. `/api/v1/site-events` lists every recorded pick, count and hold with its outcome, and for an applied count `expected`, `laterMovements`, `reserved`, `onHandBefore` and `onHandAfter`.
 
 | Kind | Meaning | Usual response |
 |---|---|---|
@@ -172,6 +223,13 @@ A site creation is recorded in the immutable `site_registration` table, and a st
 | `FULFILLMENT_AFTER_RELEASE` | Fulfillment requested after the hold ended. After an expiry, Order also goes to `EXCEPTION`. After a release, Order hears nothing. | Reconcile both |
 | `FULFILLMENT_WITHOUT_RESERVATION` | The signal named a reservation this order does not own | Check the producer |
 | `CANCELLED_AFTER_COMMIT` | An order was cancelled after its hold committed | Decide, then release |
+| `PICK_NOT_HELD` | A site picked units for a reservation that had expired or been released. Stock and the reservation are unchanged. `detail.reservationStatus` says which. | Find the units: put them back (a new count records them), or reconcile the order with its owner if they shipped. A released hold stays on the site's pick list until it expires or ships, because release publishes no event |
+| `PICK_MISMATCH` | A pick for an unknown reservation, or whose `orderId`, `siteId`, `sku` or `quantity` differs. `detail.differs` lists the fields; `detail.reservation` is `UNKNOWN` when none exists. Nothing changed. | Check the site's pick list and the producing site; correct the physical stock with a count if units moved |
+| `COUNT_CONFLICT` | A count implied fewer units (`detail.expected`) than are reserved, or fewer than zero. `on_hand` was held at `max(expected, reserved, 0)` (`detail.onHandAfter`), so `detail.shortfall` units are held but may not exist. No reservation was cancelled. | Recount at the site. If the units are really missing, decide which held orders cannot be filled and release them; the next count then applies normally |
+| `COUNT_UNKNOWN_STOCK` | A count for a SKU the site has no stock record for. Nothing changed. | If the SKU belongs at the site, create the record (`PUT /internal/v1/stock/{siteId}/{sku}`), then have the site count again |
+| `HOLD_UNKNOWN` | A hold `RELEASED` that was never `PLACED` here. Holds change no stock in v1. | Check the site's hold records; usually a lost or dead-lettered `PLACED` event |
+
+The site kinds never change a reservation. A later count supersedes an earlier one by `countedAt`, so a recount is the normal way to clear a count discrepancy.
 
 A long `box1_inventory_committed_oldest_age_seconds` means a committed hold is waiting on fulfillment. That is correct while no adapter runs, and the units stay held.
 
@@ -179,6 +237,6 @@ A long `box1_inventory_committed_oldest_age_seconds` means a committed hold is w
 
 `.tekton/release.yaml` runs build, `box1-security-gates` with `gate`, promote, shared smoke, and `inventory-api-smoke`.
 
-Reverting the promotion in `box1-workloads-dev` restores the previous image. **Not exercised.** Flyway does not roll back: `V1` and `V2` stay applied, and any schema repair is a forward migration. The onboarding scaffold ignores those tables, so reverting to it is safe for the data, but events keep waiting, and holds stop expiring, until the service returns.
+Reverting the promotion in `box1-workloads-dev` restores the previous image. **Not exercised.** Flyway does not roll back: `V1` to `V4` stay applied, and any schema repair is a forward migration. `V4` is additive, so an image before it runs against it: it never reads the site tables or `business_at`, writes shipment movements with `business_at` NULL (read as their processing time), and always writes an `order_id` on reconciliation items. Its group `inventory-site` simply stops; on return, consumption resumes from the committed offset. The onboarding scaffold ignores those tables, so reverting to it is safe for the data, but events keep waiting, and holds stop expiring, until the service returns.
 
 Database backup and restore follow `postgres/STORAGE-BACKUP-RESTORE.md` in `box1-ops-contracts`.

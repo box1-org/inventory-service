@@ -27,8 +27,11 @@ import jakarta.inject.Inject;
 import org.box1.inventory.domain.InboundEvent;
 import org.box1.inventory.domain.PoisonEventException;
 import org.box1.inventory.domain.ReasonCode;
+import org.box1.inventory.domain.SiteEvent;
 import org.box1.inventory.messaging.EventParser;
 import org.box1.inventory.messaging.EventTestSupport;
+import org.box1.inventory.messaging.SiteEventParser;
+import org.eclipse.microprofile.config.ConfigProvider;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -46,6 +49,9 @@ class ContractTest {
 
     @Inject
     ObjectMapper mapper;
+
+    @Inject
+    SiteEventParser siteParser;
 
     private static String fetch(String path) throws IOException, InterruptedException {
         String ref = System.getProperty("contracts.ref");
@@ -189,6 +195,75 @@ class ContractTest {
                 operations++;
             }
         }
-        assertEquals(4, operations);
+        assertEquals(6, operations);
+    }
+
+    /** The operator reads added for site events are documented, with the same problem responses as the other reads. */
+    @Test
+    void generatedOpenApiDocumentsTheSiteReads() throws Exception {
+        JsonNode generated = JSON.readTree(given().accept("application/json").when().get("/q/openapi").asString());
+        for (String[] route : new String[][] {{"/api/v1/reconciliation-items", "listReconciliationItems"},
+            {"/api/v1/site-events", "listSiteEvents"}}) {
+            JsonNode get = generated.path("paths").path(route[0]).path("get");
+            assertEquals(route[1], get.path("operationId").asText(), route[0]);
+            for (String code : new String[] {"400", "401"}) {
+                assertTrue(get.path("responses").path(code).path("content").has("application/problem+json"), code + " of " + route[0]);
+            }
+            assertTrue(get.path("responses").path("200").path("content").has("application/json"), route[0]);
+        }
+    }
+
+    @Test
+    void siteParserAcceptsEverySiteFixture() throws Exception {
+        Set<String> seen = new TreeSet<>();
+        for (JsonNode fixture : JSON.readTree(fetch("fixtures/events.json"))) {
+            String type = fixture.get("eventType").asText();
+            if (SiteEventParser.SITE_TYPES.contains(type)) {
+                SiteEvent event = siteParser.parse(fixture.toString()).orElseThrow();
+                assertEquals(type, event.eventType());
+                assertEquals(fixture.get("aggregateId").asText(), event.siteId());
+                seen.add(type);
+            }
+        }
+        assertEquals(new TreeSet<>(SiteEventParser.SITE_TYPES), seen);
+    }
+
+    /** The site events the container tests send are valid under the contract, so those tests exercise real shapes. */
+    @Test
+    void testSiteEventsMatchTheirSchemas() throws Exception {
+        JsonSchema envelope = schema("envelope");
+        String[] samples = {
+            Harness.pick(Harness.id(), "site_ds9", "pick_t1", "ord_1", "res_1", "SKU-42", 2),
+            Harness.count(Harness.id(), "site_ds9", "cnt_t1", "SKU-42", 0, Instant.parse("2026-11-10T12:00:00Z")),
+            Harness.hold(Harness.id(), "site_ds9", "hold_t1", "SKU-42", 1, "RELEASED"),
+        };
+        for (String sample : samples) {
+            JsonNode value = JSON.readTree(sample);
+            assertTrue(envelope.validate(value).isEmpty(), sample + ": " + envelope.validate(value));
+            JsonSchema payload = schema(value.get("eventType").asText().replaceAll("\\.v[0-9]+$", ""));
+            assertTrue(payload.validate(value.get("payload")).isEmpty(), sample + ": " + payload.validate(value.get("payload")));
+            assertTrue(siteParser.parse(sample).isPresent());
+        }
+    }
+
+    /** The site kinds and the effect rules this service implements are the ones SITE.md names. */
+    @Test
+    void siteReconciliationKindsAndTopicsAreTheContracts() throws Exception {
+        String site = fetch("SITE.md");
+        for (String word : new String[] {"PICK_NOT_HELD", "PICK_MISMATCH", "COUNT_CONFLICT", "COUNT_UNKNOWN_STOCK", "HOLD_UNKNOWN",
+            "`inventory-site`", "box1.site.dlq.v1", "max(E, reserved, 0)", "box1-site-id"}) {
+            assertTrue(site.contains(word), word);
+        }
+        var config = ConfigProvider.getConfig();
+        String topic = config.getValue("mp.messaging.incoming.site-events.topic", String.class);
+        String group = config.getValue("mp.messaging.incoming.site-events.group.id", String.class);
+        String dlq = config.getValue("mp.messaging.incoming.site-events.dead-letter-queue.topic", String.class);
+        assertEquals("earliest", config.getValue("mp.messaging.incoming.site-events.auto.offset.reset", String.class));
+        String topics = fetch("TOPICS.md");
+        assertTrue(topics.lines().anyMatch(l -> l.startsWith("| `" + topic + "` |") && l.contains("`" + group + "`")
+                && l.contains("`siteId`")), "TOPICS.md row for " + topic + " names group " + group);
+        assertTrue(topics.lines().anyMatch(l -> l.startsWith("| `" + dlq + "` | Inventory |")), "TOPICS.md row for " + dlq);
+        assertTrue(topics.contains("`" + group + "` (box1-docs#129) is the Inventory service's consumer of `" + topic + "`"),
+                "TOPICS.md site consumer groups section");
     }
 }

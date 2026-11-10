@@ -35,21 +35,26 @@ public class InventoryMetrics {
     private final InventoryStore store;
     private final String bootstrapServers;
     private final String dlqTopic;
+    private final String siteDlqTopic;
     private final ExpiryGate gate;
     private final AtomicReference<InventoryStore.Stats> stats =
             new AtomicReference<>(new InventoryStore.Stats(0, 0, 0, 0, 0, 0, 0));
     private final AtomicLong dlqDepth = new AtomicLong(-1);
     private final AtomicLong refreshFailures = new AtomicLong();
     private final AtomicLong dlqFailures = new AtomicLong();
+    private final AtomicLong siteDlqDepth = new AtomicLong(-1);
+    private final AtomicLong siteDlqFailures = new AtomicLong();
     private Admin admin;
 
     public InventoryMetrics(MeterRegistry registry, InventoryStore store,
             @ConfigProperty(name = "kafka.bootstrap.servers") String bootstrapServers,
-            @ConfigProperty(name = "inventory.dlq.topic") String dlqTopic, ExpiryGate gate) {
+            @ConfigProperty(name = "inventory.dlq.topic") String dlqTopic,
+            @ConfigProperty(name = "inventory.site.dlq.topic") String siteDlqTopic, ExpiryGate gate) {
         this.registry = registry;
         this.store = store;
         this.bootstrapServers = bootstrapServers;
         this.dlqTopic = dlqTopic;
+        this.siteDlqTopic = siteDlqTopic;
         this.gate = gate;
         Gauge.builder("box1_outbox_pending", stats, s -> s.get().outboxPending()).register(registry);
         Gauge.builder("box1_outbox_oldest_pending_age_seconds", stats, s -> s.get().oldestPendingSeconds()).register(registry);
@@ -59,6 +64,7 @@ public class InventoryMetrics {
         Gauge.builder("box1_inventory_reconciliation_open", stats, s -> s.get().reconciliationOpen()).register(registry);
         Gauge.builder("box1_inventory_reserved_drift", stats, s -> s.get().reservedDrift()).register(registry);
         Gauge.builder("box1_inventory_dlq_depth", dlqDepth, AtomicLong::get).register(registry);
+        Gauge.builder("box1_inventory_site_dlq_depth", siteDlqDepth, AtomicLong::get).register(registry);
     }
 
     /** Refresh the database snapshot. On failure the last values stay and a failure counter rises. */
@@ -94,7 +100,39 @@ public class InventoryMetrics {
         }
     }
 
+    /**
+     * Refresh the site dead-letter depth (box1.site.dlq.v1). Separate from the inventory dead-letter refresh, and it never
+     * signals the expiry gate, so a site topic that does not exist yet cannot hold reservation expiry.
+     */
+    @Scheduled(every = "${inventory.metrics.refresh-interval}", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
+    void refreshSiteDlqDepth() {
+        try {
+            siteDlqDepth.set(depth(siteDlqTopic));
+            siteDlqFailures.set(0);
+        } catch (ExecutionException | TimeoutException | RuntimeException error) {
+            if (siteDlqFailures.getAndIncrement() == 0) {
+                LOG.warnv("Unable to read site dead-letter depth: {0}", error.getClass().getSimpleName());
+            }
+            siteDlqDepth.set(-1);
+            registry.counter("box1_inventory_metrics_refresh_failures", "source", "kafka-site").increment();
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     private long readDlqDepth() throws InterruptedException, ExecutionException, TimeoutException {
+        return depth(dlqTopic);
+    }
+
+    private long depth(String topic) throws InterruptedException, ExecutionException, TimeoutException {
+        Admin client = admin();
+        List<TopicPartition> partitions = client.describeTopics(List.of(topic)).allTopicNames()
+                .get(ADMIN_TIMEOUT_SECONDS, TimeUnit.SECONDS).get(topic).partitions().stream()
+                .map(p -> new TopicPartition(topic, p.partition())).toList();
+        return offsets(client, partitions, OffsetSpec.latest()) - offsets(client, partitions, OffsetSpec.earliest());
+    }
+
+    private synchronized Admin admin() {
         if (admin == null) {
             Properties config = new Properties();
             config.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
@@ -103,21 +141,18 @@ public class InventoryMetrics {
             config.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, 4000);
             admin = Admin.create(config);
         }
-        List<TopicPartition> partitions = admin.describeTopics(List.of(dlqTopic)).allTopicNames()
-                .get(ADMIN_TIMEOUT_SECONDS, TimeUnit.SECONDS).get(dlqTopic).partitions().stream()
-                .map(p -> new TopicPartition(dlqTopic, p.partition())).toList();
-        return offsets(partitions, OffsetSpec.latest()) - offsets(partitions, OffsetSpec.earliest());
+        return admin;
     }
 
-    private long offsets(List<TopicPartition> partitions, OffsetSpec spec)
+    private static long offsets(Admin client, List<TopicPartition> partitions, OffsetSpec spec)
             throws InterruptedException, ExecutionException, TimeoutException {
         Map<TopicPartition, OffsetSpec> request = partitions.stream().collect(Collectors.toMap(p -> p, p -> spec));
-        return admin.listOffsets(request).all().get(ADMIN_TIMEOUT_SECONDS, TimeUnit.SECONDS).values().stream()
+        return client.listOffsets(request).all().get(ADMIN_TIMEOUT_SECONDS, TimeUnit.SECONDS).values().stream()
                 .mapToLong(ListOffsetsResult.ListOffsetsResultInfo::offset).sum();
     }
 
     @PreDestroy
-    void close() {
+    synchronized void close() {
         if (admin != null) {
             admin.close(java.time.Duration.ofSeconds(2));
         }

@@ -18,7 +18,7 @@
         <skipITs>true</skipITs>
         <surefire-plugin.version>3.5.6</surefire-plugin.version>
         <!-- box1-ops-contracts commit that contract tests validate against. -->
-        <contracts.ref>85d72e3cce2f1928ea60d3e6b3f73b313a5828fe</contracts.ref>
+        <contracts.ref>5b7296ca87aeed7a4f89a443e45931def4706658</contracts.ref>
         <!-- Container-backed tests need a local runtime; the CI task has none. Use -Pcontainers. -->
         <test.excluded.groups>containers</test.excluded.groups>
     </properties>

@@ -314,12 +314,23 @@ public class InventoryStore {
         }
     }
 
-    /** Append to the immutable on-hand ledger. */
+    /** Append to the immutable on-hand ledger. Its business time is the time it was recorded. */
     @Transactional(Transactional.TxType.MANDATORY)
     public void movement(String siteId, String sku, int delta, String kind, String actor, String reason, String reference,
             Instant now) {
-        String sql = "INSERT INTO stock_movement (site_id, sku, delta, kind, actor, reason, reference, occurred_at)"
-                + " VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+        movement(siteId, sku, delta, kind, actor, reason, reference, now, null);
+    }
+
+    /**
+     * Append to the immutable on-hand ledger. businessAt is when the movement happened in the business, such as a
+     * shipment's shippedAt, when that differs from the time it was recorded; null means the recorded time. The site count
+     * rule orders movements by it.
+     */
+    @Transactional(Transactional.TxType.MANDATORY)
+    public void movement(String siteId, String sku, int delta, String kind, String actor, String reason, String reference,
+            Instant now, Instant businessAt) {
+        String sql = "INSERT INTO stock_movement (site_id, sku, delta, kind, actor, reason, reference, occurred_at, business_at)"
+                + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
         try (Connection c = dataSource.getConnection(); PreparedStatement s = c.prepareStatement(sql)) {
             s.setString(1, siteId);
             s.setString(2, sku);
@@ -329,6 +340,7 @@ public class InventoryStore {
             s.setString(6, reason);
             s.setString(7, reference);
             s.setTimestamp(8, Timestamp.from(now));
+            s.setTimestamp(9, businessAt == null ? null : Timestamp.from(businessAt));
             s.executeUpdate();
         } catch (SQLException error) {
             throw new StoreException(error);
