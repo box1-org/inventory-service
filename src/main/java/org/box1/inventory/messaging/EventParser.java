@@ -24,16 +24,16 @@ public class EventParser {
     public static final Set<String> FULFILLMENT_TOPIC_TYPES = Set.of(InboundEvent.SHIPMENT_CONFIRMED,
             InboundEvent.SHIPMENT_FAILED);
 
-    private static final Pattern ORDER = Pattern.compile("^ord_[A-Za-z0-9_-]{1,124}$");
-    private static final Pattern RESERVATION = Pattern.compile("^res_[A-Za-z0-9_-]{1,124}$");
+    static final Pattern ORDER = Pattern.compile("^ord_[A-Za-z0-9_-]{1,124}$");
+    static final Pattern RESERVATION = Pattern.compile("^res_[A-Za-z0-9_-]{1,124}$");
     private static final Pattern FULFILLMENT = Pattern.compile("^ful_[A-Za-z0-9_-]{1,124}$");
     private static final Pattern SHIPMENT = Pattern.compile("^shp_[A-Za-z0-9_-]{1,124}$");
-    private static final Pattern SITE = Pattern.compile("^site_[A-Za-z0-9_-]{1,120}$");
-    private static final Pattern SKU = Pattern.compile("^[^\\p{Cntrl}]{1,80}$");
+    static final Pattern SITE = Pattern.compile("^site_[A-Za-z0-9_-]{1,120}$");
+    static final Pattern SKU = Pattern.compile("^[^\\p{Cntrl}]{1,80}$");
     private static final Pattern CUSTOMER = Pattern.compile("^[^\\p{Cntrl}]{1,128}$");
     private static final Pattern STATE = Pattern.compile("^[A-Z][A-Z_]{0,63}$");
     private static final Pattern REASON = Pattern.compile("^[A-Z][A-Z0-9_]{0,63}$");
-    private static final Pattern TRACEPARENT = Pattern.compile("^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$");
+    static final Pattern TRACEPARENT = Pattern.compile("^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$");
     private static final Pattern BOUNDED_ID = Pattern.compile("^[^\\p{Cntrl}]{1,128}$");
     private static final Pattern UUID_FORM = Pattern.compile("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$");
 
@@ -76,6 +76,7 @@ public class EventParser {
         String shipmentId = null;
         String toState = null;
         boolean retryable = false;
+        Instant shippedAt = null;
         switch (type) {
             case InboundEvent.ORDER_PLACED -> {
                 matching(payload, "customerId", CUSTOMER);
@@ -99,7 +100,7 @@ public class EventParser {
             case InboundEvent.SHIPMENT_CONFIRMED -> {
                 fulfillmentRequestId = matching(payload, "fulfillmentRequestId", FULFILLMENT);
                 shipmentId = matching(payload, "shipmentId", SHIPMENT);
-                instant(payload, "shippedAt");
+                shippedAt = instant(payload, "shippedAt");
             }
             case InboundEvent.SHIPMENT_FAILED -> {
                 fulfillmentRequestId = matching(payload, "fulfillmentRequestId", FULFILLMENT);
@@ -112,7 +113,7 @@ public class EventParser {
             default -> throw new PoisonEventException("Unsupported eventType");
         }
         return new InboundEvent(eventId, type, orderId, occurredAt, correlationId, traceparent, sku, quantity, siteId,
-                reservationId, fulfillmentRequestId, shipmentId, toState, retryable);
+                reservationId, fulfillmentRequestId, shipmentId, toState, retryable, shippedAt);
     }
 
     private static Integer quantity(JsonNode payload) {
@@ -123,7 +124,7 @@ public class EventParser {
         return value.asInt();
     }
 
-    private JsonNode read(String value) {
+    JsonNode read(String value) {
         if (value == null) {
             throw new PoisonEventException("Empty record value");
         }
@@ -138,7 +139,7 @@ public class EventParser {
         }
     }
 
-    private static UUID uuid(JsonNode root) {
+    static UUID uuid(JsonNode root) {
         String value = text(root, "eventId");
         if (!UUID_FORM.matcher(value).matches()) {
             throw new PoisonEventException("Invalid eventId");
@@ -146,7 +147,7 @@ public class EventParser {
         return UUID.fromString(value);
     }
 
-    private static String text(JsonNode node, String field) {
+    static String text(JsonNode node, String field) {
         JsonNode value = node.get(field);
         if (value == null || !value.isTextual() || value.asText().isEmpty()) {
             throw new PoisonEventException("Missing " + field);
@@ -154,11 +155,11 @@ public class EventParser {
         return value.asText();
     }
 
-    private static String bounded(JsonNode node, String field) {
+    static String bounded(JsonNode node, String field) {
         return matching(node, field, BOUNDED_ID);
     }
 
-    private static String matching(JsonNode node, String field, Pattern pattern) {
+    static String matching(JsonNode node, String field, Pattern pattern) {
         String value = text(node, field);
         if (!pattern.matcher(value).matches()) {
             throw new PoisonEventException("Invalid " + field);
@@ -166,7 +167,7 @@ public class EventParser {
         return value;
     }
 
-    private static Instant instant(JsonNode node, String field) {
+    static Instant instant(JsonNode node, String field) {
         try {
             return Instant.parse(text(node, field));
         } catch (DateTimeParseException error) {

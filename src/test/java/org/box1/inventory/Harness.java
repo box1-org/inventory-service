@@ -35,6 +35,8 @@ final class Harness {
     static final String INVENTORY_TOPIC = "box1.inventory.events.v1";
     static final String FULFILLMENT_TOPIC = "box1.fulfillment.events.v1";
     static final String DLQ_TOPIC = "box1.inventory.dlq.v1";
+    static final String SITE_TOPIC = "box1.site.events.v1";
+    static final String SITE_DLQ_TOPIC = "box1.site.dlq.v1";
     static final String FLOOR = "2026-01-01T00:00:00Z";
     static final String BEFORE_FLOOR = "2025-12-31T23:59:59Z";
     static final String TRACEPARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
@@ -263,6 +265,80 @@ final class Harness {
     static String stateChanged(String eventId, String orderId, String toState) {
         return envelope(eventId, "order.state-changed.v1", orderId, Instant.now().toString(), Map.of(
                 "fromState", "SUBMITTED", "toState", toState, "reasonCode", "TEST", "changedAt", Instant.now().toString()));
+    }
+
+    /** A site event envelope: keyed and aggregated by siteId, as SITE.md states. */
+    static String siteEnvelope(String eventId, String type, String siteId, String correlationId, String causationId,
+            Map<String, Object> payload) {
+        Map<String, Object> full = new LinkedHashMap<>();
+        full.put("siteId", siteId);
+        full.putAll(payload);
+        Map<String, Object> envelope = new LinkedHashMap<>();
+        envelope.put("eventId", eventId);
+        envelope.put("eventType", type);
+        envelope.put("schemaVersion", 1);
+        envelope.put("aggregateId", siteId);
+        envelope.put("occurredAt", Instant.now().toString());
+        envelope.put("correlationId", correlationId);
+        envelope.put("causationId", causationId);
+        envelope.put("traceparent", TRACEPARENT);
+        envelope.put("payload", full);
+        try {
+            return JSON.writeValueAsString(envelope);
+        } catch (JsonProcessingException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    static String pick(String eventId, String siteId, String pickId, String orderId, String reservationId, String sku,
+            int quantity) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("pickId", pickId);
+        payload.put("orderId", orderId);
+        payload.put("reservationId", reservationId);
+        payload.put("sku", sku);
+        payload.put("quantity", quantity);
+        payload.put("pickedAt", Instant.now().toString());
+        return siteEnvelope(eventId, "site.pick-confirmed.v1", siteId, orderId, id(), payload);
+    }
+
+    static String count(String eventId, String siteId, String countId, String sku, int counted, Instant countedAt) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("countId", countId);
+        payload.put("sku", sku);
+        payload.put("countedQuantity", counted);
+        payload.put("countedAt", countedAt.toString());
+        payload.put("reason", "CYCLE_COUNT");
+        return siteEnvelope(eventId, "site.stock-adjusted.v1", siteId, countId, "site-ops:count", payload);
+    }
+
+    static String hold(String eventId, String siteId, String holdId, String sku, int quantity, String action) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("holdId", holdId);
+        payload.put("sku", sku);
+        payload.put("quantity", quantity);
+        payload.put("action", action);
+        payload.put("reasonCode", "DAMAGED");
+        payload.put("changedAt", Instant.now().toString());
+        return siteEnvelope(eventId, "site.stock-held.v1", siteId, holdId, "site-ops:hold", payload);
+    }
+
+    static String shippedAt(String eventId, String orderId, String shipmentId, Instant shippedAt) {
+        return envelope(eventId, "shipment.confirmed.v1", orderId, Instant.now().toString(), Map.of(
+                "fulfillmentRequestId", "ful_" + orderId.substring(4), "shipmentId", shipmentId, "shippedAt", shippedAt.toString()));
+    }
+
+    /** Send a site event keyed by siteId with the box1-site-id header, as a site gateway does. */
+    static void sendSite(String siteId, String value) {
+        Properties config = new Properties();
+        config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, FullStackResource.kafka.getBootstrapServers());
+        try (KafkaProducer<String, String> producer = new KafkaProducer<>(config, new StringSerializer(), new StringSerializer())) {
+            ProducerRecord<String, String> record = new ProducerRecord<>(SITE_TOPIC, siteId, value);
+            record.headers().add("box1-site-id", siteId.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            producer.send(record).get();
+        } catch (Exception error) {
+            throw new IllegalStateException(error);
+        }
     }
 
     static String id() {

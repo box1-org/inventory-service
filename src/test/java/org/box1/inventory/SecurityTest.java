@@ -16,6 +16,8 @@ class SecurityTest {
     private static final String RESTOCK = "/internal/v1/stock/site_nyc/SKU-42/restock";
     private static final String RELEASE = "/internal/v1/reservations/res_1/release";
     private static final String BODY = "{\"quantity\":1,\"reason\":\"test\"}";
+    private static final String[] READS = {"/api/v1/inventory", "/api/v1/reservations/res_1", "/api/v1/reconciliation-items",
+        "/api/v1/site-events"};
 
     private static void rejected(int status, String token, String path) {
         var request = given().contentType("application/json").header("Idempotency-Key", "k").body(BODY);
@@ -101,21 +103,35 @@ class SecurityTest {
     @Test
     void anInvalidTokenOnAReadRouteIsRejected() {
         for (String token : new String[] {"not-a-token", TestTokens.expired(), TestTokens.wrongKey()}) {
-            given().header("Authorization", "Bearer " + token).when().get("/api/v1/inventory").then().statusCode(401)
-                    .contentType(startsWith("application/problem+json"));
-            given().header("Authorization", "Bearer " + token).when().get("/api/v1/reservations/res_1").then().statusCode(401);
+            for (String path : READS) {
+                given().header("Authorization", "Bearer " + token).when().get(path).then().statusCode(401)
+                        .contentType(startsWith("application/problem+json"));
+            }
         }
     }
 
     @Test
     void readsFailClosedByDefault() {
-        given().when().get("/api/v1/inventory").then().statusCode(401).contentType(startsWith("application/problem+json"));
-        given().when().get("/api/v1/reservations/res_1").then().statusCode(401);
+        for (String path : READS) {
+            given().when().get(path).then().statusCode(401).contentType(startsWith("application/problem+json"));
+        }
+    }
+
+    @Test
+    void siteReadFiltersAreValidatedBeforeAnyQuery() {
+        String viewer = TestTokens.viewer();
+        for (String path : new String[] {"/api/v1/reconciliation-items?status=CLOSED", "/api/v1/reconciliation-items?kind=bad",
+            "/api/v1/reconciliation-items?siteId=nyc", "/api/v1/reconciliation-items?orderId=1042",
+            "/api/v1/reconciliation-items?limit=101", "/api/v1/site-events?type=SHIP", "/api/v1/site-events?siteId=ds9",
+            "/api/v1/site-events?offset=-1"}) {
+            given().header("Authorization", "Bearer " + viewer).when().get(path).then().statusCode(400)
+                    .contentType(startsWith("application/problem+json"));
+        }
     }
 
     @Test
     void readRoutesExposeNoMutation() {
-        for (String path : new String[] {"/api/v1/inventory", "/api/v1/reservations/res_1"}) {
+        for (String path : READS) {
             given().contentType("application/json").body("{}").when().post(path).then().statusCode(405);
             given().contentType("application/json").body("{}").when().put(path).then().statusCode(405);
             given().when().delete(path).then().statusCode(405);
